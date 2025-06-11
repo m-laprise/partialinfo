@@ -283,23 +283,9 @@ function main(;
     num_heads = 2,
     learning_rate = 0.005,
     epochs = 100, 
-    patience = 20,
-    #drop_rate = 0.6,
-    transductive = true
+    patience = 20
 )
-    H, y, adj, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
-
-    if transductive
-        adj_train = adj_val = adj_test = adj
-        X_train = X_val = X_test = H
-        y_train = y_val = y_test = y
-    else
-        X_train, X_val, X_test = H[:, train_idx], H[:, val_idx], H[:, test_idx]
-        y_train, y_val, y_test = y[:, train_idx], y[:, val_idx], y[:, test_idx]
-        adj_train = Dict((key, value) for (key, value) in adj if key in train_idx)
-        adj_val = Dict((key, value) for (key, value) in adj if key in val_idx)
-        adj_test = Dict((key, value) for (key, value) in adj if key in test_idx)
-    end
+    H, y, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
 
     rng = Random.MersenneTwister(23)
 
@@ -353,14 +339,14 @@ function main(;
     prep = DI.prepare_gradient(
         train_loss, backend, 
         ps, DI.Constant(st), DI.Constant(model), 
-        DI.Constant((X_train, y_train, adj_train, train_idx))
+        DI.Constant((H, y, A, train_idx))
     )
 
     for epoch in 1:epochs
         loss, grads = DI.value_and_gradient(
             train_loss, prep, backend,
             ps, DI.Constant(st), DI.Constant(model),
-            DI.Constant((X_train, y_train, adj_train, train_idx))
+            DI.Constant((H, y, A, train_idx))
         )
 
         if !isfinite(loss)
@@ -372,7 +358,7 @@ function main(;
         val_l = first(
             loss_function(
                 ps, Lux.testmode(st), model, 
-                (X_val, y_val, adj_val, val_idx),
+                (H, y, A, val_idx),
             ),
         )
 
@@ -392,11 +378,11 @@ function main(;
 
     test_loss = loss_function(
         ps, Lux.testmode(st), model, 
-        (X_test, y_test, adj_test, test_idx),
+        (H, y, A, test_idx),
     )[1]
     test_acc = accuracy(
         model(
-                (X_test, adj_test, test_idx),
+                (H, A, test_idx),
                 ps, Lux.testmode(st),
             )[1][1],
         Array(y_test),
@@ -410,8 +396,7 @@ test_loss, test_acc = main(
     num_heads = 8,
     learning_rate = 0.005,
     epochs = 20, 
-    patience = 100,
-    transductive = true
+    patience = 100
 )
 
 # ==== tests ==== #

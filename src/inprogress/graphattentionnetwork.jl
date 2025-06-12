@@ -105,6 +105,17 @@ function attention!v2(
     end
 end
 
+function right_sparse_mul!(H_out, H, E, A)
+    @inbounds for node in axes(H_out, 2) # For each node
+        for (ngh_idx, _) in A[node] # Iterate over neighbors attention scores (non-zero entries of the column)
+            @turbo for feature_idx in axes(H_out, 1) # Feature by feature, add to H_out the value * its attention weight
+                H_out[feature_idx, node] += H[feature_idx, ngh_idx] * E[ngh_idx, node]
+            end
+        end
+    end
+end
+
+
 # ========== Define GAT Layer ========== #
 struct GATLayer{F0, F1} <: Lux.AbstractLuxLayer
     F_in::Int
@@ -163,6 +174,8 @@ function (l::GATLayer)(x, ps, st)
     # Unpack inputs
     H, A = x 
     @assert size(H, 2) == l.N "Node features must be of size (F_in, N)"
+    fill!(st.E, 0f0)
+    fill!(st.H_out, 0f0)
 
     # Project features (each col represents a node) into key and query vectors
     mul!(st.Q, ps.Wq, H)
@@ -176,7 +189,8 @@ function (l::GATLayer)(x, ps, st)
         l.d
     )
 
-    mul!(st.H_out, H, st.E)
+    right_sparse_mul!(st.H_out, H, st.E, A)
+
     return (st.H_out, A), st
 end
 
@@ -408,6 +422,7 @@ using BenchmarkTools
 @btime model((H, A), ps, st)
 # 4.110 ms (96188 allocations: 5.33 MiB)
 # 80.204 ms (2 allocations: 96 bytes)
+# 6.373 ms (2 allocations: 96 bytes)
 
 @code_warntype model((H, A), ps, st)
 

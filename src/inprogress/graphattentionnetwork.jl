@@ -8,31 +8,24 @@ import MLDatasets: Cora
 import Optimisers: Adam, setup, adjust!, update!
 using Printf
 
+import LoopVectorization: @turbo
+
 # ========== Define helper functions ========== #
 
-function create_adj(rng, N::Int, threshold::Float32)
+function create_adj(rng, N::Int, threshold::Float32; undirected = true, selfloops = true)
     # Create random edge list
     edges::Vector{Tuple{Int64, Int64}} = [(i, j) for i in 1:N, j in 1:N if i != j && rand(rng) < threshold]
-    # Dictionary mapping each node ID (1 to N) to a list of neighbor IDs
-    # Sparse neighbor mapping / connectivity mask (i => neighbors / i attends to neighbors)
-    adj::Dict{Int64, Vector{Int64}} = Dict(i => Int[] for i in 1:N)
+    A = falses(N, N)
     for (i, j) in edges
-        push!(adj[i], j)
-        push!(adj[j], i)
+        A[i, j] = true
+        undirected && i != j && (A[j, i] = true)
     end
-    # Add self-loops if any missing
-    for i in 1:N
-        if !haskey(adj, i)
-            adj[i] = Int[]
-        end
-        # locate key i, check if i is in the values, if not push it
-        if i in values(adj)
-            continue
-        else
-            push!(adj[i], i)
+    if selfloops
+        for i in 1:N
+            A[i, i] = true
         end
     end
-    return (edges, adj)
+    return (edges, A)
 end
 
 function create_adj(edges::Vector{Tuple{Int64, Int64}}, N::Int; undirected = true, selfloops = true)
@@ -47,93 +40,73 @@ function create_adj(edges::Vector{Tuple{Int64, Int64}}, N::Int; undirected = tru
         end
     end
     A
-    #=adj::Dict{Int64, Vector{Int64}} = Dict(i => Int[] for i in 1:N)
-    for (i, j) in edges
-        push!(adj[i], j)
-        undirected && i != j && push!(adj[j], i)
-    end
-    return sort(adj)=#
 end
 
-"""
-The order of the columns of WH MUST correspond to the order of the keys of adj,
-however the indexes are not the same. WH is 1-indexed and adj can contain arbitrary keys.
-"""
-function attention_scores!(
-    e::Dict{Tuple{Int,Int}, Float32},
-    WH::Matrix{Float32}, # node features
-    a::Vector{Float32},  # attention weights
-    adj::Dict{Int, Vector{Int}},
-    activation::F,
-    leaky_slope::Float32
-) where F
-    key_to_index = Dict(k => i for (i, k) in enumerate(keys(adj)))
-    for (idx_i, key_i) in enumerate(keys(adj)) # For each node i,
-        hi = view(WH, :, idx_i) 
-        for key_j in adj[key_i]     # for each neighbor j of node i
-            if haskey(adj, key_j)
-                idx_j = key_to_index[key_j]
-                hj = view(WH, :, idx_j)
-                e[(key_i, key_j)] = activation(dot(a, vcat(hi, hj)), leaky_slope)
-            end
-        end
-    end
-end
-
-function normalize_scores!(
-    e::Dict{Tuple{Int,Int}, Float32}, 
-    adj::Dict{Int, Vector{Int}}
+function attention!(
+    E::Matrix{Float32}, 
+    H_out::Matrix{Float32},
+    H::Matrix{Float32}, # node features (value matrix)
+    Q::Matrix{Float32},  # query matrix
+    K::Matrix{Float32},  # key matrix
+    A::AbstractArray{Bool, 2}, # adjacency matrix
+    d::Float32; 
+    ϵ::Tuple{Float32, Float32} = (log(1f0 + 1f-6), log(1f-6))
 )
-    # For each node i, normalize the attention scores over its neighbors
-    for key_i in keys(adj)
-        neighborkeys = [key_j for key_j in adj[key_i] if haskey(e, (key_i, key_j))]
-        if length(neighborkeys) > 0
-            neighborscores = [e[(key_i, key_j)] for key_j in neighborkeys]
-            α = mysoftmax(neighborscores)
-            for (key_j, α_j) in zip(neighborkeys, α)
-                e[(key_i, key_j)] = α_j
-            end
+    mul!(E, Q', K)
+
+    @turbo for i in axes(E, 1), j in axes(E, 2) # Normalize
+        E[i, j] = E[i, j] / d
+    end
+
+    @. E += ifelse(A, ϵ[1], ϵ[2]) # Add log(A + ϵ) efficiently
+    
+    @turbo for i in axes(E, 1), j in axes(E, 2) # Faster exp
+        E[i, j] = exp(E[i, j])
+    end
+
+    for j in axes(E, 2)           # Non allocating softmax
+        sum_j = 0f0
+        @turbo for i in axes(E, 1)
+            sum_j += E[i, j]
+        end
+        @turbo for i in axes(E, 1)
+            E[i, j] /= sum_j
         end
     end
+    
+    mul!(H_out, H, E)
 end
 
-mysoftmax(x) = softmax(x)
-mysoftmax(x::R) where R<:Real = softmax([x])
+Q = ps.Wq * H
+K = ps.Wk * H
 
-function aggregate_features!(
-    H_out::Matrix{Float32}, 
-    WH::Matrix{Float32}, 
-    e::Dict{Tuple{Int,Int}, Float32}, 
-    adj::Dict{Int, Vector{Int}}
-)
-    key_to_index = Dict(k => i for (i, k) in enumerate(keys(adj)))
-    # For each node i, aggregate the features of its neighbors
-    for (idx_i, key_i) in enumerate(keys(adj))
-        neighborkeys = [key_j for key_j in adj[key_i] if haskey(e, (key_i, key_j))]
-        # By adding each neighbor's features weighted by its attention score
-        for key_j in neighborkeys
-            #idx_j = findfirst(keys(adj) .== key_j)
-            idx_j = key_to_index[key_j]
-            @inbounds @views H_out[:, idx_i] += e[(key_i, key_j)] .* WH[:, idx_j]
-        end
-    end
-end
+E = zeros(Float32, N, N)
+H_out = zeros(Float32, f_in, N)
+
+@btime attention!($E, $H_out, $H, $Q, $K, $A, $model.d)
+#78.362 ms (0 allocations: 0 bytes)
+
+attention!(E, H_out, H, Q, K, A, model.d) 
+elu(H_out)
 
 # ========== Define GAT Layer ========== #
 
 struct GATLayer{F0, F1, F2} <: Lux.AbstractLuxLayer
     F_in::Int
+    F_hid::Int
     F_out::Int
     init_params::F0
     init_gain::Float32
     attention_activation::F1
     head_activation::F2
     leaky_slope::Float32
+    d::Real
     N::Int
 end
 
 function GATLayer(
     F_in::Int, 
+    F_hid::Int,
     F_out::Int;
     init_params = glorot_uniform, 
     init_gain = 1f0,
@@ -143,26 +116,26 @@ function GATLayer(
     N = 0
 )
     GATLayer{typeof(init_params), typeof(attention_activation), typeof(head_activation)}(
-        F_in, F_out, init_params, init_gain, attention_activation, head_activation, leaky_slope, N
+        F_in, F_hid, F_out, init_params, init_gain, attention_activation, head_activation, leaky_slope, Float32(sqrt(F_in)), N
     )
 end
 
 function Lux.initialparameters(rng::AbstractRNG, l::GATLayer)
     return (
-        W = l.init_params(rng, Float32, l.F_out, l.F_in; 
+        Wq = l.init_params(rng, Float32, l.F_hid, l.F_in; 
                           gain=l.init_gain), 
-        a = l.init_params(rng, Float32, 2 * l.F_out; 
-                          gain=l.init_gain)
+        Wk = l.init_params(rng, Float32, l.F_hid, l.F_in;
+                           gain=l.init_gain)
     )
 end
 
 function Lux.initialstates(rng::AbstractRNG, l::GATLayer)
-    if l.N > 0
-        WH = zeros(Float32, l.F_out, l.N)
-    else
-        WH = nothing
-    end
-    return (WH = WH,)
+    return (
+        Q = zeros(Float32, l.F_hid, l.N),
+        K = zeros(Float32, l.F_hid, l.N),
+        E = zeros(Float32, l.N, l.N),
+        H_out = zeros(Float32, l.F_in, l.N)
+    )
 end
 
 """
@@ -180,23 +153,21 @@ columns in the node features matrix MUST be the same.
 """
 function (l::GATLayer)(x, ps, st) 
     # Unpack inputs
-    H, adj = x # H: (F_in, N)
-    N = size(H, 2)
-    F_out = l.F_out
+    H, A = x 
+    @assert size(H, 2) == l.N "Node features must be of size (F_in, N)"
 
-    # Project features (each col represents a node)
-    WH = ps.W * H  # shape: (F_out, N)   
+    # Project features (each col represents a node) into key and query vectors
+    #Q = ps.Wq * H
+    #K = ps.Wk * H
+    mul!(st.Q, ps.Wq, H)
+    mul!(st.K, ps.Wk, H)
 
-    # Compute unnormalized attention coefficients
-    e = Dict{Tuple{Int,Int}, Float32}()
-    attention_scores!(e, WH, ps.a, adj, l.attention_activation, l.leaky_slope) # 724.834 μs (21119 allocations: 1.19 MiB)
-    # Softmax normalization
-    normalize_scores!(e, adj) # 826.375 μs (24525 allocations: 1.04 MiB)
-    # Aggregate features
-    H_out = zeros(Float32, F_out, N)
-    aggregate_features!(H_out, WH, e, adj) # 1.031 ms (50508 allocations: 2.47 MiB)
+    # Apply attention
+    #E = zeros(Float32, l.N, l.N)
+    #H_out = zeros(Float32, l.F_in, l.N)
+    attention!(st.E, st.H_out, H, st.Q, st.K, A, l.d) 
 
-    return (l.head_activation(H_out), adj), st
+    return (l.head_activation(st.H_out), A), st
 end
 
 # ========== Build Multi-Head GAT ==========
@@ -214,7 +185,14 @@ function Lux.initialparameters(rng::AbstractRNG, l::MultiHeadGAT)
     ps = NamedTuple{fieldnames}(ps_values)
     return ps
 end
-Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT) = NamedTuple()
+#Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT) = NamedTuple()
+function Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT)
+    heads = l.heads
+    fieldnames = Tuple(Symbol("head$i") for i in 1:length(heads))
+    st_values = ntuple(i -> Lux.initialstates(rng, heads[i]), length(heads))
+    st = NamedTuple{fieldnames}(st_values)
+    return st
+end
 
 (l::MultiHeadGAT)(
     x, ps, st; concat = l.concat) = l(x, ps, st, Val(concat))
@@ -227,7 +205,9 @@ function (l::MultiHeadGAT)(
         head = l.heads[i]
         pname = Symbol("head$i")
         head_ps = ps[pname]
-        (out, _), _ = head((x, adj), head_ps, NamedTuple())
+        head_st = st[pname]
+        (out, _), _ = head((x, adj), head_ps, head_st)
+        #(out, _), _ = head((x, adj), head_ps, NamedTuple())
         #head_st = st[pname]
         #out, _ = head(x, head_ps, head_st)
         return out
@@ -244,7 +224,9 @@ function (l::MultiHeadGAT)(
         head = l.heads[i]
         pname = Symbol("head$i")
         head_ps = ps[pname]
-        (out, _), _ = head((x, adj), head_ps, NamedTuple())
+        head_st = st[pname]
+        (out, _), _ = head((x, adj), head_ps, head_st)
+        #(out, _), _ = head((x, adj), head_ps, NamedTuple())
         #head_st = st[pname]
         #out, _ = head(x, head_ps, head_st)
         return out
@@ -281,6 +263,7 @@ end
 
 function main(;
     num_heads = 2,
+    hidden_dim = 64,
     learning_rate = 0.005,
     epochs = 100, 
     patience = 20
@@ -293,7 +276,7 @@ function main(;
         # One layer which concatenates, with the head activations
         MultiHeadGAT(
             ntuple(_ -> GATLayer(
-                f_in, f_out; 
+                f_in, hidden_dim, f_out; 
                 attention_activation = elu, 
                 head_activation = tanh_fast), num_heads), 
             true, 
@@ -301,7 +284,7 @@ function main(;
         # One layer which averages, with no head activation and a final softmax activation
         MultiHeadGAT(
             ntuple(_ -> GATLayer(
-                f_out * num_heads, f_out; 
+                f_out * num_heads, hidden_dim, f_out; 
                 attention_activation = elu, 
                 head_activation = identity), 1), 
             false, 
@@ -404,17 +387,12 @@ H, y, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
 N = size(H, 2)
 rng = Random.MersenneTwister(23)
 
-model = GATLayer(f_in, f_out; N = N)
-model_no = GATLayer(f_in, f_out; N = 0)
+model = GATLayer(f_in, 2*f_out, f_out; N = N)
 ps, st = Lux.setup(rng, model)
-ps_no, st_no = Lux.setup(rng, model_no)
 
 y_pred, st = model((H, A), ps, st)
-y_pred_no, st_no = model_no((H, A), ps_no, st_no)
 
 using BenchmarkTools
 @btime model((H, A), ps, st)
 # 4.110 ms (96188 allocations: 5.33 MiB)
-
-@btime model_no((H, A), ps_no, st_no)
-#
+# 80.204 ms (2 allocations: 96 bytes)

@@ -115,6 +115,16 @@ function right_sparse_mul!(H_out, H, E, A)
     end
 end
 
+#=function MCK_right_sparse_mul!(H_out, H, E, A)
+    @inbounds for node in axes(H_out, 2) # For each node
+        for (ngh_idx, _) in A[node] # Iterate over neighbors attention scores (non-zero entries of the column)
+            for feature_idx in axes(H_out, 1) # Feature by feature, add to H_out the value * its attention weight
+                H_out[feature_idx, node] += H[feature_idx, ngh_idx] * E[ngh_idx, node]
+            end
+        end
+    end
+end
+Mooncake.@mooncake_overlay right_sparse_mul!(H_out, H, E, A) = MCK_right_sparse_mul!(H_out, H, E, A)=#
 
 # ========== Define GAT Layer ========== #
 struct GATLayer{F0, F1} <: Lux.AbstractLuxLayer
@@ -126,7 +136,6 @@ struct GATLayer{F0, F1} <: Lux.AbstractLuxLayer
     leaky_slope::Float32
     d::Float32
     N::Int
-    epsilons::Tuple{Float32, Float32}
 end
 
 function GATLayer(
@@ -137,11 +146,10 @@ function GATLayer(
     attention_activation = leakyrelu,
     leaky_slope::Float32 = 0.2f0,
     N::Int = 0,
-    epsilon::Float32 = 1f-6
 )
     GATLayer{typeof(init_params), typeof(attention_activation)}(
         F_in, F_hid, init_params, init_gain, attention_activation, leaky_slope, 
-        Float32(sqrt(F_in)), N, (log(1f0 + epsilon), log(epsilon))
+        Float32(sqrt(F_in)), N, #attention_dropout
     )
 end
 
@@ -171,9 +179,7 @@ The node features is a matrix of shape (F_in, N), where F_in is
 the number of features per node and N is the number of nodes.
 """
 function (l::GATLayer)(x, ps, st) 
-    # Unpack inputs
     H, A = x 
-    @assert size(H, 2) == l.N "Node features must be of size (F_in, N)"
     fill!(st.E, 0f0)
     fill!(st.H_out, 0f0)
 
@@ -301,11 +307,11 @@ end
 function main(;
     num_heads = 2,
     hidden_dim = 64,
-    learning_rate = 0.005,
+    learning_rate = 0.005f0,
     epochs = 100, 
     patience = 20
 )
-    H, y, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
+    H, y, _, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
 
     rng = Random.MersenneTwister(23)
 
@@ -399,11 +405,11 @@ function main(;
     return test_loss, test_acc
 end
 
-# Enzyme.API.strictAliasing!(false)
+Enzyme.API.strictAliasing!(false)
 test_loss, test_acc = main(
     num_heads = 8,
     hidden_dim = 8,
-    learning_rate = 0.005,
+    learning_rate = 0.005f0,
     epochs = 50, 
     patience = 10
 )
@@ -420,23 +426,11 @@ ps, st = Lux.setup(rng, model)
 
 using BenchmarkTools
 @btime model((H, A), ps, st)
-# 4.110 ms (96188 allocations: 5.33 MiB)
-# 80.204 ms (2 allocations: 96 bytes)
 # 6.373 ms (2 allocations: 96 bytes)
 
 @code_warntype model((H, A), ps, st)
 
-#attention!(st.E, st.H_out, H, st.Q, st.K, A, model.d; ϵ = model.epsilons)
-
-attention!v2(st.E, st.Q, st.K, A, model.d)
-
-#@btime attention!($st.E, $st.H_out, $H, $st.Q, $st.K, $A, $model.d;
-#                  ϵ = $model.epsilons)
-# 77.698 ms (0 allocations: 0 bytes)
-
-st.E .= zeros(size(st.E))
 @btime attention!v2($st.E, $st.Q, $st.K, $A, $model.d)
-# 63.618 ms (0 allocations: 0 bytes); without final mul! 227.791 μs (0 allocations: 0 bytes)
 
 model = Lux.Chain(
     MultiHeadGAT(

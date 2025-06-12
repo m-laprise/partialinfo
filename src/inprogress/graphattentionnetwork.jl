@@ -8,7 +8,7 @@ import MLDatasets: Cora
 import Optimisers: Adam, setup, adjust!, update!
 using Printf
 
-import LoopVectorization: @turbo
+#import LoopVectorization: @turbo
 
 # ========== Define helper functions ========== #
 
@@ -54,22 +54,22 @@ function attention!(
 )
     mul!(E, Q', K)
 
-    @turbo for i in axes(E, 1), j in axes(E, 2) # Normalize
+    @inbounds for i in axes(E, 1), j in axes(E, 2) # Normalize
         E[i, j] = E[i, j] / d
     end
 
     @. E += ifelse(A, ϵ[1], ϵ[2]) # Add log(A + ϵ) efficiently
 
-    @turbo for i in axes(E, 1), j in axes(E, 2) # Faster exp
+    @inbounds for i in axes(E, 1), j in axes(E, 2) # Faster exp
         E[i, j] = exp(E[i, j])
     end
 
     for j in axes(E, 2)           # Non allocating softmax
         sum_j = 0f0
-        @turbo for i in axes(E, 1)
+        @inbounds for i in axes(E, 1)
             sum_j += E[i, j]
         end
-        @turbo for i in axes(E, 1)
+        @inbounds for i in axes(E, 1)
             E[i, j] /= sum_j
         end
     end
@@ -227,7 +227,7 @@ function (l::MultiHeadGAT)(x, ps, st, ::Val{true})
         new_states = merge(new_states, NamedTuple{(pname,)}((new_head_st,)))
     end
 
-    return (reduce(vcat, outputs), A), new_states
+    return (reduce(vcat, outputs)::Matrix{Float32}, A), new_states
 end
 
 # Forward pass: averaging mode
@@ -267,7 +267,7 @@ function (l::MultiHeadGAT)(x, ps, st, ::Val{false})
 
     stacked = cat(outputs...; dims=3)               # (F_out, N, num_heads)
     final = dropdims(mean(stacked; dims=3), dims=3) # (F_out, N)
-    return (final, A), new_states
+    return (final::Matrix{Float32}, A), new_states
 end
 
 # ==== Try with Cora data ===== #
@@ -322,27 +322,23 @@ function main(;
 
     @printf "Total Trainable Parameters: %0.4f M\n" (Lux.parameterlength(ps) / 1.0e6)
 
-    function masked_loss(y_pred, y_true, mask)
-        CrossEntropyLoss(; agg=mean, logits=Val(true))(
-            y_pred[:, mask], y_true[:, mask]
-        )
-    end
-
     function loss_function(ps, st, model::Chain, (x, y, adj, mask))
-        (y_pred, _), st = model((x, adj), ps, st)
-        loss = masked_loss(y_pred, y, mask)
+        y_pred, st = model((x, adj), ps, st)
+        loss = CrossEntropyLoss(; agg=mean, logits=Val(true))(
+            y_pred[:, mask], 
+            y[:, mask]
+        )
         return loss, st, (; y_pred)
     end
 
     accuracy(y_pred, y) = mean(onecold(y_pred) .== onecold(y)) * 100
-
     train_loss(ps, st, model::Chain, (X, y, adj, mask)) = loss_function(ps, st, model::Chain, (X, y, adj, mask))[1]
 
     best_loss_val = Inf
     cnt = 0
 
-    backend = DI.AutoMooncake(; config=nothing)
-    #backend = DI.AutoEnzyme(mode=set_runtime_activity(Enzyme.Reverse))
+    #backend = DI.AutoMooncake(; config=nothing)
+    backend = DI.AutoEnzyme(mode=set_runtime_activity(Enzyme.Reverse))
 
     prep = DI.prepare_gradient(
         train_loss, backend, 
@@ -393,7 +389,7 @@ function main(;
                 (H, A, test_idx),
                 ps, Lux.testmode(st),
             )[1][1],
-        Array(y_test),
+        Array(y),
     )
     @printf "Test Loss: %.6f\tTest Acc: %.4f%%\n" test_loss test_acc
     return test_loss, test_acc
@@ -401,9 +397,10 @@ end
 
 # Enzyme.API.strictAliasing!(false)
 test_loss, test_acc = main(
-    num_heads = 8,
+    num_heads = 4,
+    hidden_dim = 32,
     learning_rate = 0.005,
-    epochs = 20, 
+    epochs = 50, 
     patience = 100
 )
 
@@ -413,17 +410,6 @@ N = size(H, 2)
 rng = Random.MersenneTwister(23)
 
 model = GATLayer(f_in, 2*f_out; N = N)
-
-model = Lux.Chain(
-    MultiHeadGAT(
-            ntuple(_ -> GATLayer(
-                f_in, 64; N = size(H, 2)), 8), 
-            false),
-    x -> x[1],
-    LayerNorm((f_in,)),
-    Dense(f_in, f_out, leakyrelu)
-)
-
 ps, st = Lux.setup(rng, model)
 
 (y_pred), st = model((H, A), ps, st)
@@ -439,3 +425,14 @@ using BenchmarkTools
 #78.362 ms (0 allocations: 0 bytes)
 attention!(E, H_out, H, Q, K, A, model.d) 
 elu(H_out)
+
+model = Lux.Chain(
+    MultiHeadGAT(
+        ntuple(_ -> GATLayer(
+            f_in, 64; N = size(H, 2)), 8), 
+        false),
+    x -> x[1],
+    LayerNorm((f_in,)),
+    Dense(f_in, f_out, leakyrelu)
+)
+ps, st = Lux.setup(rng, model)

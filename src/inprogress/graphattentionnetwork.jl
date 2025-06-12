@@ -42,7 +42,7 @@ function create_adj(edges::Vector{Tuple{Int64, Int64}}, N::Int; undirected = tru
     A
 end
 
-function attention!(
+#=function attention!(
     E::Matrix{Float32}, 
     H_out::Matrix{Float32},
     H::Matrix{Float32}, # node features (value matrix)
@@ -75,6 +75,34 @@ function attention!(
     end
     
     mul!(H_out, H, E)
+end=#
+
+function attention!v2(
+    E::Matrix{Float32}, 
+    Q::Matrix{Float32},  # query matrix
+    K::Matrix{Float32},  # key matrix
+    grouped_pairs::Vector{Vector{Tuple{Int, Int}}},
+    d::Float32
+)
+    # Compute and exponentiate logits
+    @inbounds for group in grouped_pairs
+        for (i, j) in group
+            @views qi = Q[:, i]
+            @views kj = K[:, j]
+            E[i, j] = exp(dot(qi, kj) / d)
+        end
+    end
+    # Apply colwise non-allocating softmax
+    @inbounds for j in eachindex(grouped_pairs)
+        group = grouped_pairs[j]
+        sum_j = 0f0
+        for (i, _) in group
+            sum_j += E[i, j]
+        end
+        for (i, _) in group
+            E[i, j] /= sum_j
+        end
+    end
 end
 
 # ========== Define GAT Layer ========== #
@@ -140,15 +168,15 @@ function (l::GATLayer)(x, ps, st)
     mul!(st.Q, ps.Wq, H)
     mul!(st.K, ps.Wk, H)
 
-    # Apply attention
-    attention!(
-        st.E, st.H_out, 
-        H, st.Q, st.K, 
-        A, 
-        l.d;
-        ϵ = l.epsilons
+    # Get attention scores
+    attention!v2(
+        st.E,
+        st.Q, st.K, 
+        A,
+        l.d
     )
 
+    mul!(st.H_out, H, st.E)
     return (st.H_out, A), st
 end
 
@@ -224,6 +252,13 @@ function (l::MultiHeadGAT)(x, ps, st, ::Val{false})
 end
 
 # ==== Try with Cora data ===== #
+function group_by_col(mypairs::Vector{Tuple{Int, Int}}, N::Int)
+    grouped = [Tuple{Int, Int}[] for _ in 1:N]
+    for (i, j) in mypairs
+        push!(grouped[j], (i, j))
+    end
+    return grouped  # Vector{Vector{Tuple{Int, Int}}} of length N
+end
 
 function cora_data()
     data = Cora()
@@ -240,11 +275,13 @@ function cora_data()
     dst = gph.edge_index[2]
 
     edges = sort(collect(zip(src, dst)))
-    A = create_adj(edges, n; undirected = true, selfloops = true)
+    AdjM = create_adj(edges, n; undirected = true, selfloops = true)
+    mypairs = [(i, j) for i in axes(AdjM, 1), j in axes(AdjM, 2) if AdjM[i,j]]
+    A = group_by_col(mypairs, n)
 
     train_idx, val_idx, test_idx = (1:140, 141:640, 1709:2708)
 
-    return H, y, A, (f_in, f_out), (train_idx, val_idx, test_idx)
+    return H, y, AdjM, A, (f_in, f_out), (train_idx, val_idx, test_idx)
 end
 
 function main(;
@@ -358,7 +395,7 @@ test_loss, test_acc = main(
 )
 
 # ==== tests ==== #
-H, y, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
+H, y, AdjM, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
 N = size(H, 2)
 rng = Random.MersenneTwister(23)
 
@@ -374,10 +411,17 @@ using BenchmarkTools
 
 @code_warntype model((H, A), ps, st)
 
-@btime attention!($E, $H_out, $H, $Q, $K, $A, $model.d)
-#78.362 ms (0 allocations: 0 bytes)
-attention!(E, H_out, H, Q, K, A, model.d) 
-elu(H_out)
+#attention!(st.E, st.H_out, H, st.Q, st.K, A, model.d; ϵ = model.epsilons)
+
+attention!v2(st.E, st.Q, st.K, A, model.d)
+
+#@btime attention!($st.E, $st.H_out, $H, $st.Q, $st.K, $A, $model.d;
+#                  ϵ = $model.epsilons)
+# 77.698 ms (0 allocations: 0 bytes)
+
+st.E .= zeros(size(st.E))
+@btime attention!v2($st.E, $st.Q, $st.K, $A, $model.d)
+# 63.618 ms (0 allocations: 0 bytes); without final mul! 227.791 μs (0 allocations: 0 bytes)
 
 model = Lux.Chain(
     MultiHeadGAT(

@@ -59,7 +59,7 @@ function attention!(
     end
 
     @. E += ifelse(A, ϵ[1], ϵ[2]) # Add log(A + ϵ) efficiently
-    
+
     @turbo for i in axes(E, 1), j in axes(E, 2) # Faster exp
         E[i, j] = exp(E[i, j])
     end
@@ -77,46 +77,32 @@ function attention!(
     mul!(H_out, H, E)
 end
 
-Q = ps.Wq * H
-K = ps.Wk * H
-
-E = zeros(Float32, N, N)
-H_out = zeros(Float32, f_in, N)
-
-@btime attention!($E, $H_out, $H, $Q, $K, $A, $model.d)
-#78.362 ms (0 allocations: 0 bytes)
-
-attention!(E, H_out, H, Q, K, A, model.d) 
-elu(H_out)
-
 # ========== Define GAT Layer ========== #
-
-struct GATLayer{F0, F1, F2} <: Lux.AbstractLuxLayer
+struct GATLayer{F0, F1} <: Lux.AbstractLuxLayer
     F_in::Int
     F_hid::Int
-    F_out::Int
     init_params::F0
     init_gain::Float32
     attention_activation::F1
-    head_activation::F2
     leaky_slope::Float32
-    d::Real
+    d::Float32
     N::Int
+    epsilons::Tuple{Float32, Float32}
 end
 
 function GATLayer(
     F_in::Int, 
-    F_hid::Int,
-    F_out::Int;
+    F_hid::Int;
     init_params = glorot_uniform, 
-    init_gain = 1f0,
+    init_gain::Float32 = 1f0,
     attention_activation = leakyrelu,
-    head_activation = identity,
-    leaky_slope = 0.2,
-    N = 0
+    leaky_slope::Float32 = 0.2f0,
+    N::Int = 0,
+    epsilon::Float32 = 1f-6
 )
-    GATLayer{typeof(init_params), typeof(attention_activation), typeof(head_activation)}(
-        F_in, F_hid, F_out, init_params, init_gain, attention_activation, head_activation, leaky_slope, Float32(sqrt(F_in)), N
+    GATLayer{typeof(init_params), typeof(attention_activation)}(
+        F_in, F_hid, init_params, init_gain, attention_activation, leaky_slope, 
+        Float32(sqrt(F_in)), N, (log(1f0 + epsilon), log(epsilon))
     )
 end
 
@@ -142,14 +128,7 @@ end
 Forward pass for a single graph attention head. 
 The input x is a tuple of (node features, adjacency matrix).
 The node features is a matrix of shape (F_in, N), where F_in is 
-the number of features per node and N is the number of nodes; the 
-matrix is indexed from 1.
-
-The adjacency matrix is a dictionary mapping each node ID to a list 
-of neighbor IDs, but the IDs are not restricted to the range 1 to N.
-
-The order of the nodes in the adjacency list and the order of the 
-columns in the node features matrix MUST be the same.
+the number of features per node and N is the number of nodes.
 """
 function (l::GATLayer)(x, ps, st) 
     # Unpack inputs
@@ -157,84 +136,138 @@ function (l::GATLayer)(x, ps, st)
     @assert size(H, 2) == l.N "Node features must be of size (F_in, N)"
 
     # Project features (each col represents a node) into key and query vectors
-    #Q = ps.Wq * H
-    #K = ps.Wk * H
     mul!(st.Q, ps.Wq, H)
     mul!(st.K, ps.Wk, H)
 
     # Apply attention
-    #E = zeros(Float32, l.N, l.N)
-    #H_out = zeros(Float32, l.F_in, l.N)
-    attention!(st.E, st.H_out, H, st.Q, st.K, A, l.d) 
+    attention!(
+        st.E, st.H_out, 
+        H, st.Q, st.K, 
+        A, 
+        l.d;
+        ϵ = l.epsilons
+    )
 
-    return (l.head_activation(st.H_out), A), st
+    return (st.H_out, A), st
 end
 
 # ========== Build Multi-Head GAT ==========
 
-struct MultiHeadGAT{N, H<:GATLayer, Bool, F} <: Lux.AbstractLuxLayer
+struct MultiHeadGAT{N, H<:GATLayer, Bool} <: Lux.AbstractLuxLayer
     heads::NTuple{N, H}
-    concat::Bool #  if false, average outputs
-    final_activation::F  # should be identity if concat is true
+    concat::Bool # true = concat, false = average
 end
 
+# Initial parameters
 function Lux.initialparameters(rng::AbstractRNG, l::MultiHeadGAT)
+    ps = NamedTuple{Tuple(Symbol("head$i") for i in 1:length(l.heads))}(
+        ntuple(i -> Lux.initialparameters(rng, l.heads[i]), length(l.heads))
+    )
+    return ps
+end
+
+# Initial states
+function Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT)
+    st = NamedTuple{Tuple(Symbol("head$i") for i in 1:length(l.heads))}(
+        ntuple(i -> Lux.initialstates(rng, l.heads[i]), length(l.heads))
+    )
+    return st
+end
+
+#=function Lux.initialparameters(rng::AbstractRNG, l::MultiHeadGAT)
     heads = l.heads
     fieldnames = Tuple(Symbol("head$i") for i in 1:length(heads))
     ps_values = ntuple(i -> Lux.initialparameters(rng, heads[i]), length(heads))
     ps = NamedTuple{fieldnames}(ps_values)
     return ps
 end
-#Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT) = NamedTuple()
+
 function Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT)
     heads = l.heads
     fieldnames = Tuple(Symbol("head$i") for i in 1:length(heads))
     st_values = ntuple(i -> Lux.initialstates(rng, heads[i]), length(heads))
     st = NamedTuple{fieldnames}(st_values)
     return st
-end
+end=#
 
+# Dispatcher to allow `model(x, ps, st; concat=true|false)`
 (l::MultiHeadGAT)(
     x, ps, st; concat = l.concat) = l(x, ps, st, Val(concat))
 
-function (l::MultiHeadGAT)(
+# Forward pass: concatenation mode
+#=function (l::MultiHeadGAT)(
     x, ps, st, ::Val{true}
 )
-    x, adj = x
+    H, A = x
     outputs = map(1:length(l.heads)) do i
         head = l.heads[i]
         pname = Symbol("head$i")
         head_ps = ps[pname]
         head_st = st[pname]
-        (out, _), _ = head((x, adj), head_ps, head_st)
-        #(out, _), _ = head((x, adj), head_ps, NamedTuple())
-        #head_st = st[pname]
-        #out, _ = head(x, head_ps, head_st)
+        (out, _), head_st = head((H, A), head_ps, head_st)
         return out
     end
 
-    return (reduce(vcat, outputs)::Matrix{Float32}, adj), st    # (F_out * num_heads, N)
+    return (reduce(vcat, outputs)::Matrix{Float32}, A), st    # (F_out * num_heads, N)
+end=#
+function (l::MultiHeadGAT)(x, ps, st, ::Val{true})
+    H, A = x
+    outputs = Matrix{Float32}[]
+    new_states = NamedTuple()
+
+    for i in 1:length(l.heads)
+        head = l.heads[i]
+        pname = Symbol("head$i")
+        head_ps = ps[pname]
+        head_st = st[pname]
+
+        (out, A), new_head_st = head((H, A), head_ps, head_st)
+        push!(outputs, out)
+
+        new_states = merge(new_states, NamedTuple{(pname,)}((new_head_st,)))
+    end
+
+    return (reduce(vcat, outputs), A), new_states
 end
 
-function (l::MultiHeadGAT)(
+# Forward pass: averaging mode
+#=function (l::MultiHeadGAT)(
     x, ps, st, ::Val{false}
 )
-    x, adj = x
+    H, A = x
     outputs = map(1:length(l.heads)) do i
         head = l.heads[i]
         pname = Symbol("head$i")
         head_ps = ps[pname]
         head_st = st[pname]
-        (out, _), _ = head((x, adj), head_ps, head_st)
-        #(out, _), _ = head((x, adj), head_ps, NamedTuple())
-        #head_st = st[pname]
-        #out, _ = head(x, head_ps, head_st)
+        (out, _), head_st = head((H, A), head_ps, head_st)
         return out
     end
 
     stacked = cat(outputs...; dims=3)               # (F_out, N, num_heads)
     final = dropdims(mean(stacked; dims=3), dims=3) # (F_out, N)
-    return (l.final_activation(final)::Matrix{Float32}, adj), st
+    return (final::Matrix{Float32}, A), st
+end=#
+function (l::MultiHeadGAT)(x, ps, st, ::Val{false})
+    H, A = x
+    outputs = Matrix{Float32}[]
+    new_states = NamedTuple()
+
+    for i in 1:length(l.heads)
+        head = l.heads[i]
+        pname = Symbol("head$i")
+        head_ps = ps[pname]
+        head_st = st[pname]
+
+        (out, A), new_head_st = head((H, A), head_ps, head_st)
+        push!(outputs, out)
+
+        new_states = merge(new_states, NamedTuple{(pname,)}((new_head_st,)))
+    end
+
+    stacked = cat(outputs...; dims=3)               # (F_out, N, num_heads)
+    final = dropdims(mean(stacked; dims=3), dims=3) # (F_out, N)
+    return (final, A), new_states
 end
 
 # ==== Try with Cora data ===== #
@@ -273,26 +306,18 @@ function main(;
     rng = Random.MersenneTwister(23)
 
     model = Lux.Chain(
-        # One layer which concatenates, with the head activations
         MultiHeadGAT(
             ntuple(_ -> GATLayer(
-                f_in, hidden_dim, f_out; 
-                attention_activation = elu, 
-                head_activation = tanh_fast), num_heads), 
-            true, 
-            identity),
-        # One layer which averages, with no head activation and a final softmax activation
-        MultiHeadGAT(
-            ntuple(_ -> GATLayer(
-                f_out * num_heads, hidden_dim, f_out; 
-                attention_activation = elu, 
-                head_activation = identity), 1), 
-            false, 
-            identity)
+                f_in, hidden_dim; 
+                N = size(H, 2)), num_heads), 
+            false),
+        x -> x[1],
+        LayerNorm((f_in,)),
+        Dense(f_in, f_out, leakyrelu)
     )
     ps, st = Lux.setup(rng, model)
 
-    opt = Adam(learning_rate, (0.9, 0.9))
+    opt = Adam(learning_rate, (0.99, 0.9))
     opt_state = setup(opt, ps)
 
     @printf "Total Trainable Parameters: %0.4f M\n" (Lux.parameterlength(ps) / 1.0e6)
@@ -387,12 +412,30 @@ H, y, A, (f_in, f_out), (train_idx, val_idx, test_idx) = cora_data()
 N = size(H, 2)
 rng = Random.MersenneTwister(23)
 
-model = GATLayer(f_in, 2*f_out, f_out; N = N)
+model = GATLayer(f_in, 2*f_out; N = N)
+
+model = Lux.Chain(
+    MultiHeadGAT(
+            ntuple(_ -> GATLayer(
+                f_in, 64; N = size(H, 2)), 8), 
+            false),
+    x -> x[1],
+    LayerNorm((f_in,)),
+    Dense(f_in, f_out, leakyrelu)
+)
+
 ps, st = Lux.setup(rng, model)
 
-y_pred, st = model((H, A), ps, st)
+(y_pred), st = model((H, A), ps, st)
 
 using BenchmarkTools
 @btime model((H, A), ps, st)
 # 4.110 ms (96188 allocations: 5.33 MiB)
 # 80.204 ms (2 allocations: 96 bytes)
+
+@code_warntype model((H, A), ps, st)
+
+@btime attention!($E, $H_out, $H, $Q, $K, $A, $model.d)
+#78.362 ms (0 allocations: 0 bytes)
+attention!(E, H_out, H, Q, K, A, model.d) 
+elu(H_out)

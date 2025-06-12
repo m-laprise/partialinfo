@@ -5,10 +5,10 @@ using Mooncake, Enzyme
 
 import OneHotArrays: onecold, onehotbatch
 import MLDatasets: Cora
-import Optimisers: Adam, setup, adjust!, update!
+import Optimisers: AdamW, setup, adjust!, update!
 using Printf
 
-#import LoopVectorization: @turbo
+import LoopVectorization: @turbo
 
 # ========== Define helper functions ========== #
 
@@ -54,22 +54,22 @@ function attention!(
 )
     mul!(E, Q', K)
 
-    @inbounds for i in axes(E, 1), j in axes(E, 2) # Normalize
+    @turbo for i in axes(E, 1), j in axes(E, 2) # Normalize
         E[i, j] = E[i, j] / d
     end
 
     @. E += ifelse(A, ϵ[1], ϵ[2]) # Add log(A + ϵ) efficiently
 
-    @inbounds for i in axes(E, 1), j in axes(E, 2) # Faster exp
+    @turbo for i in axes(E, 1), j in axes(E, 2) # Faster exp
         E[i, j] = exp(E[i, j])
     end
 
     for j in axes(E, 2)           # Non allocating softmax
         sum_j = 0f0
-        @inbounds for i in axes(E, 1)
+        @turbo for i in axes(E, 1)
             sum_j += E[i, j]
         end
-        @inbounds for i in axes(E, 1)
+        @turbo for i in axes(E, 1)
             E[i, j] /= sum_j
         end
     end
@@ -120,7 +120,8 @@ function Lux.initialstates(rng::AbstractRNG, l::GATLayer)
         Q = zeros(Float32, l.F_hid, l.N),
         K = zeros(Float32, l.F_hid, l.N),
         E = zeros(Float32, l.N, l.N),
-        H_out = zeros(Float32, l.F_in, l.N)
+        H_out = zeros(Float32, l.F_in, l.N),
+        training = true
     )
 end
 
@@ -174,42 +175,11 @@ function Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT)
     return st
 end
 
-#=function Lux.initialparameters(rng::AbstractRNG, l::MultiHeadGAT)
-    heads = l.heads
-    fieldnames = Tuple(Symbol("head$i") for i in 1:length(heads))
-    ps_values = ntuple(i -> Lux.initialparameters(rng, heads[i]), length(heads))
-    ps = NamedTuple{fieldnames}(ps_values)
-    return ps
-end
-
-function Lux.initialstates(rng::AbstractRNG, l::MultiHeadGAT)
-    heads = l.heads
-    fieldnames = Tuple(Symbol("head$i") for i in 1:length(heads))
-    st_values = ntuple(i -> Lux.initialstates(rng, heads[i]), length(heads))
-    st = NamedTuple{fieldnames}(st_values)
-    return st
-end=#
-
 # Dispatcher to allow `model(x, ps, st; concat=true|false)`
 (l::MultiHeadGAT)(
     x, ps, st; concat = l.concat) = l(x, ps, st, Val(concat))
 
 # Forward pass: concatenation mode
-#=function (l::MultiHeadGAT)(
-    x, ps, st, ::Val{true}
-)
-    H, A = x
-    outputs = map(1:length(l.heads)) do i
-        head = l.heads[i]
-        pname = Symbol("head$i")
-        head_ps = ps[pname]
-        head_st = st[pname]
-        (out, _), head_st = head((H, A), head_ps, head_st)
-        return out
-    end
-
-    return (reduce(vcat, outputs)::Matrix{Float32}, A), st    # (F_out * num_heads, N)
-end=#
 function (l::MultiHeadGAT)(x, ps, st, ::Val{true})
     H, A = x
     outputs = Matrix{Float32}[]
@@ -231,23 +201,6 @@ function (l::MultiHeadGAT)(x, ps, st, ::Val{true})
 end
 
 # Forward pass: averaging mode
-#=function (l::MultiHeadGAT)(
-    x, ps, st, ::Val{false}
-)
-    H, A = x
-    outputs = map(1:length(l.heads)) do i
-        head = l.heads[i]
-        pname = Symbol("head$i")
-        head_ps = ps[pname]
-        head_st = st[pname]
-        (out, _), head_st = head((H, A), head_ps, head_st)
-        return out
-    end
-
-    stacked = cat(outputs...; dims=3)               # (F_out, N, num_heads)
-    final = dropdims(mean(stacked; dims=3), dims=3) # (F_out, N)
-    return (final::Matrix{Float32}, A), st
-end=#
 function (l::MultiHeadGAT)(x, ps, st, ::Val{false})
     H, A = x
     outputs = Matrix{Float32}[]
@@ -313,11 +266,11 @@ function main(;
             false),
         x -> x[1],
         LayerNorm((f_in,)),
-        Dense(f_in, f_out, leakyrelu)
+        Dense(f_in, f_out, swish)
     )
     ps, st = Lux.setup(rng, model)
 
-    opt = Adam(learning_rate, (0.99, 0.9))
+    opt = AdamW(learning_rate)
     opt_state = setup(opt, ps)
 
     @printf "Total Trainable Parameters: %0.4f M\n" (Lux.parameterlength(ps) / 1.0e6)
@@ -388,7 +341,7 @@ function main(;
         model(
                 (H, A, test_idx),
                 ps, Lux.testmode(st),
-            )[1][1],
+            )[1],
         Array(y),
     )
     @printf "Test Loss: %.6f\tTest Acc: %.4f%%\n" test_loss test_acc
@@ -397,11 +350,11 @@ end
 
 # Enzyme.API.strictAliasing!(false)
 test_loss, test_acc = main(
-    num_heads = 4,
-    hidden_dim = 32,
+    num_heads = 8,
+    hidden_dim = 8,
     learning_rate = 0.005,
     epochs = 50, 
-    patience = 100
+    patience = 10
 )
 
 # ==== tests ==== #

@@ -17,7 +17,7 @@ class Swish(nn.Module):
         return x * torch.sigmoid(x)
 
 
-# Dot-product attention GAT layer (like Julia version)
+# Dot-product attention GAT layer
 class DotGATLayer(nn.Module):
     def __init__(self, in_features, out_features, dropout=0.6):
         super().__init__()
@@ -69,6 +69,31 @@ class MultiHeadDotGAT(nn.Module):
         x = self.output(x)
         return x
 
+# EarlyStopping utility class
+class EarlyStopping:
+    def __init__(self, patience=10, delta=1e-4, mode='min'):
+        self.patience = patience
+        self.delta = delta
+        self.mode = mode
+        self.best_score = None
+        self.best_state = None
+        self.counter = 0
+        self.should_stop = False
+
+    def __call__(self, score, model):
+        score = -score if self.mode == 'min' else score
+
+        if self.best_score is None:
+            self.best_score = score
+            self.best_state = model.state_dict()
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.should_stop = True
+        else:
+            self.best_score = score
+            self.best_state = model.state_dict()
+            self.counter = 0
 
 def train(model, data, optimizer, criterion):
     model.train()
@@ -81,18 +106,14 @@ def train(model, data, optimizer, criterion):
 
 
 @torch.no_grad()
-def evaluate(model, data, criterion):
+def evaluate(model, data, criterion, split):
     model.eval()
     out = model(data.x, data.edge_index)
     pred = out.argmax(dim=1)
-
-    losses = {}
-    accs = {}
-    for split in ['train', 'val', 'test']:
-        mask = data[f'{split}_mask']
-        losses[split] = criterion(out[mask], data.y[mask]).item()
-        accs[split] = (pred[mask] == data.y[mask]).float().mean().item() * 100
-    return losses, accs
+    mask = data[f'{split}_mask']
+    loss = criterion(out[mask], data.y[mask]).item()
+    acc = (pred[mask] == data.y[mask]).float().mean().item() * 100
+    return loss, acc
 
 
 def main(args):
@@ -111,33 +132,34 @@ def main(args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
 
+    early_stopper = EarlyStopping(patience=args.patience, delta=1e-4, mode='min')
+    best_val_acc = 0.0
     best_val_loss = float('inf')
-    patience_counter = 0
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(model, data, optimizer, criterion)
-        losses, accs = evaluate(model, data, criterion)
+        val_loss, val_acc = evaluate(model, data, criterion, split='val')
 
         if epoch % 10 == 0 or epoch == 1:
             print(f"Epoch {epoch:03d} | "
                   f"Train Loss: {train_loss:.4f} | "
-                  f"Val Loss: {losses['val']:.4f} | "
-                  f"Test Acc: {accs['test']:.2f}%")
+                  f"Val Loss: {val_loss:.4f} | "
+                  f"Val Acc: {val_acc:.2f}%")
+            
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
 
-        if losses['val'] < best_val_loss:
-            best_val_loss = losses['val']
-            best_model_state = model.state_dict()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= args.patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
+        early_stopper(val_loss, model)
+        if early_stopper.should_stop:
+            print(f"Early stopping at epoch {epoch}")
+            break
 
-    model.load_state_dict(best_model_state)
-    _, accs = evaluate(model, data, criterion)
-    print(f"\nFinal Test Accuracy: {accs['test']:.2f}%")
-
+    # Load best model
+    model.load_state_dict(early_stopper.best_state)
+    
+    test_loss, test_acc = evaluate(model, data, criterion, split='test')
+    print(f"\nBest Val Accuracy: {best_val_acc:.2f}%")
+    print(f"Final Test Accuracy (best model): {test_acc:.2f}%")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Dot-Product GAT on Cora with CLI options')

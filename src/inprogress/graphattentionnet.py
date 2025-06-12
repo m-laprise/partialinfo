@@ -129,12 +129,16 @@ def main(args):
         agg_mode=args.agg
     ).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        lr=args.lr, 
+        weight_decay=args.weight_decay
+    )
+    
     criterion = nn.CrossEntropyLoss()
 
     early_stopper = EarlyStopping(patience=args.patience, delta=1e-4, mode='min')
     best_val_acc = 0.0
-    best_val_loss = float('inf')
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(model, data, optimizer, criterion)
@@ -169,6 +173,8 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--patience', type=int, default=10, help='Patience for early stopping')
     parser.add_argument('--dropout', type=float, default=0.6, help='Dropout rate')
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
+                        help='Weight decay (L2 regularization) for AdamW optimizer')
     parser.add_argument('--agg', type=str, choices=['concat', 'mean'], default='concat',
                         help='Aggregation mode for multi-head (concat or mean)')
     args = parser.parse_args()

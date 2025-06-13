@@ -145,6 +145,95 @@ def train_demo():
         print(f"Final Metrics — RMSE_obs: {torch.sqrt(mse_obs):.4f}, RMSE_all: {torch.sqrt(mse_all):.4f}")
 
 
+def matrix_to_graph(M, mask):
+    n, m = M.shape
+    obs = np.argwhere(mask)
+    vals = M[mask].astype(np.float32)
+    adj = sp.coo_matrix((vals, (obs[:, 0], obs[:, 1])), shape=(n, m))
+    edge_index, edge_weight = from_scipy_sparse_matrix(adj)
+    edge_index[1] += n  # shift col indices
+    return Data(edge_index=edge_index, edge_weight=edge_weight), mask, M
+
+def train_on_stream(model, optimizer, device, n, m, r, density, sigma, steps):
+    model.train()
+    for step in range(1, steps + 1):
+        M, mask = generate_low_rank(n, m, r, density, sigma)
+        data, _, _ = matrix_to_graph(M, mask)
+        data = data.to(device)
+
+        mask_tensor = torch.tensor(mask, device=device)
+        M_true = torch.tensor(M, dtype=torch.float32, device=device)
+
+        optimizer.zero_grad()
+        row_emb, col_emb = model(data.edge_index)
+
+        ri = data.edge_index[0]
+        ci = data.edge_index[1] - n
+        preds = model.predict(ri, ci, row_emb, col_emb)
+
+        # Known entries only for training
+        loss = F.mse_loss(preds, data.edge_weight)
+        loss.backward()
+        optimizer.step()
+
+        if step % 50 == 0 or step == 1:
+            with torch.no_grad():
+                full = row_emb @ col_emb.T
+                rmse_obs = torch.sqrt(F.mse_loss(full[mask_tensor], M_true[mask_tensor]))
+                rmse_all = torch.sqrt(F.mse_loss(full, M_true))
+                print(f"[Train step {step:03d}] loss: {loss.item():.4f} | "
+                      f"RMSE_obs: {rmse_obs:.4f} | RMSE_all: {rmse_all:.4f}")
+
+
+def evaluate_on_stream(model, device, n, m, r, density, sigma, trials=10):
+    model.eval()
+    rmse_all_list = []
+    rmse_obs_list = []
+
+    for _ in range(trials):
+        M, mask = generate_low_rank(n, m, r, density, sigma)
+        data, _, _ = matrix_to_graph(M, mask)
+        data = data.to(device)
+
+        mask_tensor = torch.tensor(mask, device=device)
+        M_true = torch.tensor(M, dtype=torch.float32, device=device)
+
+        with torch.no_grad():
+            row_emb, col_emb = model(data.edge_index)
+            full = row_emb @ col_emb.T
+
+            rmse_all = torch.sqrt(F.mse_loss(full, M_true))
+            rmse_obs = torch.sqrt(F.mse_loss(full[mask_tensor], M_true[mask_tensor]))
+
+            rmse_all_list.append(rmse_all.item())
+            rmse_obs_list.append(rmse_obs.item())
+
+    print(f"\n📊 Evaluation over {trials} test matrices")
+    print(f"   Avg RMSE_obs: {np.mean(rmse_obs_list):.4f}")
+    print(f"   Avg RMSE_all: {np.mean(rmse_all_list):.4f}")
+
+def main():
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    n, m, r = 80, 64, 2
+    embed_dim, num_layers = 32, 2
+    density, sigma = 0.5, 0.1
+    train_steps = 500
+    test_trials = 20
+    lr = 1e-4
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = GNN_LRMC(n, m, embed_dim, num_layers).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    print("🔧 Training...")
+    train_on_stream(model, optimizer, device, n, m, r, density, sigma, train_steps)
+
+    print("\n🧪 Testing...")
+    evaluate_on_stream(model, device, n, m, r, density, sigma, test_trials)
+
+
 if __name__ == "__main__":
-    train_demo()
+    main()
     

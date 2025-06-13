@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "matplotlib>=3.9.0",
     "pandas>=2.2.3",
     "scipy>=1.13.1",
     "tensorboard>=2.19.0",

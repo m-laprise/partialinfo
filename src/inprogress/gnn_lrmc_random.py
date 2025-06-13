@@ -11,8 +11,8 @@ class GNNLayer(MessagePassing):
     def __init__(self, in_channels, out_channels):
         super().__init__(aggr='add')  # sum aggregator
         self.lin = torch.nn.Linear(in_channels, out_channels)
-        #torch.nn.init.xavier_uniform_(self.lin.weight, gain=torch.nn.init.calculate_gain('relu'))
-        torch.nn.init.kaiming_uniform_(self.lin.weight, nonlinearity='relu')
+        torch.nn.init.xavier_uniform_(self.lin.weight, gain=0.1*torch.nn.init.calculate_gain('relu'))
+        #torch.nn.init.kaiming_uniform_(self.lin.weight, nonlinearity='relu')
         torch.nn.init.zeros_(self.lin.bias)
 
 
@@ -176,14 +176,13 @@ def train_on_stream(model, optimizer, device, n, m, r, density, sigma, steps):
         loss.backward()
         optimizer.step()
 
-        if step % 50 == 0 or step == 1:
+        if step % 100 == 0 or step == 1:
             with torch.no_grad():
                 full = row_emb @ col_emb.T
                 rmse_obs = torch.sqrt(F.mse_loss(full[mask_tensor], M_true[mask_tensor]))
                 rmse_all = torch.sqrt(F.mse_loss(full, M_true))
                 print(f"[Train step {step:03d}] loss: {loss.item():.4f} | "
                       f"RMSE_obs: {rmse_obs:.4f} | RMSE_all: {rmse_all:.4f}")
-
 
 def evaluate_on_stream(model, device, n, m, r, density, sigma, trials=10):
     model.eval()
@@ -217,9 +216,9 @@ def main():
     np.random.seed(42)
 
     n, m, r = 80, 64, 2
-    embed_dim, num_layers = 32, 2
-    density, sigma = 0.5, 0.1
-    train_steps = 500
+    embed_dim, num_layers = 132, 8
+    density, sigma = 0.5, 0
+    train_steps = 10000
     test_trials = 20
     lr = 1e-4
 
@@ -228,7 +227,9 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     print("🔧 Training...")
-    train_on_stream(model, optimizer, device, n, m, r, density, sigma, train_steps)
+    train_on_stream(
+        model, optimizer, device, n, m, r, density, sigma, train_steps
+    )
 
     print("\n🧪 Testing...")
     evaluate_on_stream(model, device, n, m, r, density, sigma, test_trials)

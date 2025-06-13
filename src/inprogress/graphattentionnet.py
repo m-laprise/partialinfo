@@ -10,12 +10,10 @@ from torch_geometric.utils import softmax
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
 # Swish activation
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
-
 
 # Dot-product attention GAT layer
 class DotGATLayer(nn.Module):

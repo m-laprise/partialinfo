@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "matplotlib>=3.9.0",
+    "networkx>=3.2.1",
     "pandas>=2.2.3",
+    "pytest>=8.4.0",
+    "pytest-cov>=6.2.1",
     "scipy>=1.13.1",
     "tensorboard>=2.19.0",
     "torch>=2.8.0.dev20250610",

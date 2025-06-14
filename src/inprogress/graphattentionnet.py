@@ -3,10 +3,13 @@ import math
 import os
 
 import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.transforms as T
+from torch_geometric.data import Data
 from torch_geometric.datasets import Planetoid
 from torch_geometric.utils import softmax
 
@@ -192,15 +195,49 @@ def plot_metrics(train_losses, val_losses, val_accs, save_path):
     plt.title("Validation Accuracy Over Epochs")
     plt.savefig(os.path.join(save_path, 'accuracy_plot.png'))
 
+def generate_random_graph(num_nodes=100, num_edges=300, num_features=16, num_classes=3):
+    G = nx.gnm_random_graph(num_nodes, num_edges, seed=42)
+    edge_index = torch.tensor(list(G.edges), dtype=torch.long).t().contiguous()
+
+    # Make edges bidirectional
+    edge_index = torch.cat([edge_index, edge_index.flip([0])], dim=1)
+
+    x = torch.randn((num_nodes, num_features), dtype=torch.float)
+    y = torch.randint(0, num_classes, (num_nodes,), dtype=torch.long)
+
+    # Create masks
+    idx = np.arange(num_nodes)
+    np.random.shuffle(idx)
+    train_size = int(0.6 * num_nodes)
+    val_size = int(0.2 * num_nodes)
+    train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    test_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    train_mask[idx[:train_size]] = True
+    val_mask[idx[train_size:train_size+val_size]] = True
+    test_mask[idx[train_size+val_size:]] = True
+
+    data = Data(x=x, edge_index=edge_index, y=y,
+                train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+    return data
 
 def main(args):
-    dataset = Planetoid(root='/tmp/Cora', name='Cora', transform=T.NormalizeFeatures())
-    data = dataset[0].to(device)
-
+    if args.dataset == 'cora':
+        dataset = Planetoid(root='/tmp/Cora', name='Cora', transform=T.NormalizeFeatures())
+        data = dataset[0].to(device)
+        in_features = dataset.num_node_features
+        out_features = dataset.num_classes
+    else:  # inductive/random
+        data = generate_random_graph(num_nodes=200, num_edges=600,
+                                    num_features=args.random_features,
+                                    num_classes=args.random_classes).to(device)
+        in_features = args.random_features
+        out_features = args.random_classes
+        
     model = MultiHeadDotGAT(
-        in_features=dataset.num_node_features,
+        in_features=in_features,
         hidden_features=args.hidden_dim,
-        out_features=dataset.num_classes,
+        out_features=out_features,
         num_heads=args.num_heads,
         dropout=args.dropout,
         agg_mode=args.agg
@@ -254,6 +291,12 @@ if __name__ == "__main__":
                         help='Weight decay (L2 regularization) for AdamW optimizer')
     parser.add_argument('--agg', type=str, choices=['concat', 'mean'], default='concat',
                         help='Aggregation mode for multi-head (concat or mean)')
+    parser.add_argument('--dataset', type=str, choices=['cora', 'random'], default='cora',
+                    help='Dataset to use: cora (transductive) or random (inductive)')
+    parser.add_argument('--random_features', type=int, default=16,
+                        help='Number of features for random graph nodes')
+    parser.add_argument('--random_classes', type=int, default=3,
+                        help='Number of classes for random graph labels')
     args = parser.parse_args()
 
     main(args)

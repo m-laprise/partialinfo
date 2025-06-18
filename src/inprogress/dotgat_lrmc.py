@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from matplotlib.ticker import MaxNLocator
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import dense_to_sparse
@@ -20,30 +21,56 @@ def generate_low_rank(n, m, r, density=0.2, sigma=0.01):
     mask = np.random.rand(n, m) < density
     return M, mask
 
-
 def unique_filename(base_dir="results", prefix="run"):
     os.makedirs(base_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(base_dir, f"{prefix}_{timestamp}")
 
+def plot_stats(stats, filename_base, true_nuclear_mean):
+    epochs = np.arange(1, len(stats["train_loss"]) + 1)
 
-def plot_stats(stats, filename_base):
-    plt.figure(figsize=(10, 6))
-    for key, values in stats.items():
-        plt.plot(values, label=key)
-    plt.xlabel("Epoch")
-    plt.ylabel("Metric")
-    plt.title("Training Metrics Over Epochs")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(f"{filename_base}_metrics.png")
-    plt.close()
+    # Plot loss-related metrics in two panels
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
+    axs[0].plot(epochs, stats["train_loss"], label="Train Loss", color='tab:blue')
+    axs[0].set_title("Training Loss")
+    axs[0].set_xlabel("Epoch")
+    axs[0].set_ylabel("Loss")
+    axs[0].grid(True)
+    axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
 
+    axs[1].plot(epochs, stats["val_known_loss"], label="Validation Known Loss", color='tab:green')
+    axs[1].plot(epochs, stats["val_unknown_loss"], label="Validation Unknown Loss", color='tab:orange')
+    axs[1].plot(epochs, stats["variance"], label="Variance", color='tab:red')
+    axs[1].set_title("Validation Loss & Variance")
+    axs[1].set_xlabel("Epoch")
+    axs[1].set_ylabel("Metric")
+    axs[1].grid(True)
+    axs[1].legend()
+    axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    fig.tight_layout()
+    fig.savefig(f"{filename_base}_loss_metrics.png")
+    plt.close(fig)
+
+    # Plot spectral diagnostics
+    fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
+    ax.plot(epochs, stats["nuclear_norm"], label="Nuclear Norm", color='tab:purple')
+    ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap (s1 - s2)", color='tab:orange')
+    ax.axhline(y=true_nuclear_mean, color='gray', linestyle='--', label="Ground Truth Mean")
+    ax.set_title("Spectral Properties Over Epochs")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Nuclear Norm / Spectral Gap")
+    ax.grid(True)
+    ax.legend()
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    fig.tight_layout()
+    fig.savefig(f"{filename_base}_spectral_diagnostics.png")
+    plt.close(fig)
 
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
-
 
 class DotGATLayer(nn.Module):
     def __init__(self, in_features, out_features, dropout=0.6):
@@ -65,7 +92,6 @@ class DotGATLayer(nn.Module):
         out = torch.zeros_like(Q).index_add_(0, col, out)
         return out + self.residual(x)
 
-
 class MultiHeadDotGAT(nn.Module):
     def __init__(self, in_features, hidden_features, output_dim, num_heads, dropout, agg_mode='concat'):
         super().__init__()
@@ -80,16 +106,16 @@ class MultiHeadDotGAT(nn.Module):
         self.swish = Swish()
         self.output = nn.Linear(final_in_dim, output_dim)
         self.residual = nn.Linear(in_features, final_in_dim) if in_features != final_in_dim else nn.Identity()
+        self.dropout = dropout
 
     def forward(self, x, edge_index):
         head_outputs = [head(x, edge_index) for head in self.heads]
         x_out = torch.cat(head_outputs, dim=1) if self.agg_mode == 'concat' else torch.stack(head_outputs).mean(dim=0)
         x_out = self.norm(x_out)
-        x_out = F.dropout(x_out, p=0.5, training=self.training)
+        x_out = F.dropout(x_out, p=self.dropout, training=self.training)
         x_out = self.swish(x_out)
         x_out = x_out + self.residual(x)
         return self.output(x_out)
-
 
 class LowRankMatrixGraphDataset(InMemoryDataset):
     def __init__(self, num_graphs=1000, n=20, m=20, r=4, density=0.2, sigma=0.01):
@@ -99,40 +125,57 @@ class LowRankMatrixGraphDataset(InMemoryDataset):
         self.r = r
         self.density = density
         self.sigma = sigma
+        self.nuclear_norm_mean = 0.0
         super().__init__('.', transform=None)
         self.data, self.slices = self._generate()
 
     def _generate(self):
         data_list = []
+        norms = []
         for _ in range(self.num_graphs):
             M, mask = generate_low_rank(self.n, self.m, self.r, self.density, self.sigma)
-            M = torch.tensor(M, dtype=torch.float)
-            mask = torch.tensor(mask, dtype=torch.bool)
-            observed = M * mask
-            edge_index = dense_to_sparse(mask.float())[0]
-            data = Data(x=observed.T, edge_index=edge_index, y=M.T, mask=mask.T)
+            M_tensor = torch.tensor(M, dtype=torch.float)
+            norms.append(torch.norm(M_tensor, p='nuc').item())
+            mask_tensor = torch.tensor(mask, dtype=torch.bool)
+            observed = M_tensor * mask_tensor
+            edge_index = dense_to_sparse(mask_tensor.float())[0]
+            data = Data(x=observed.T, edge_index=edge_index, y=M_tensor.T, mask=mask_tensor.T)
             data_list.append(data)
+        self.nuclear_norm_mean = np.mean(norms)
         return self.collate(data_list)
 
+def spectral_penalty(output):
+    U, S, V = torch.svd(output)
+    sum_rest = S[1:].sum()
+    #ratio = sum_rest / (S[0] + 1e-6)
+    N = min(output.shape)
+    penalty = sum_rest #+ ratio
+    if S[0] > 2 * N:
+        penalty += (S[0] - 2 * N) ** 2
+    elif S[0] < N / 2:
+        penalty += (N / 2 - S[0]) ** 2
+    gap = (S[0] - S[1]).item() if len(S) > 1 else 0.0
+    return penalty, S[0].item(), gap
 
-def train(model, loader, optimizer):
+def train(model, loader, optimizer, theta):
     model.train()
     total_loss = 0
     for batch in loader:
         batch = batch.to(device)
         optimizer.zero_grad()
         out = model(batch.x, batch.edge_index)
-        loss = F.mse_loss(out[batch.mask], batch.y[batch.mask])
+        l2_loss = F.mse_loss(out[batch.mask], batch.y[batch.mask])
+        penalty, _, _ = spectral_penalty(out)
+        loss = theta * l2_loss + (1 - theta) * penalty
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * batch.num_graphs
     return total_loss / len(loader.dataset)
 
-
 @torch.no_grad()
 def evaluate(model, loader):
     model.eval()
-    known_loss, unknown_loss, nuclear_norms, variances = [], [], [], []
+    known_loss, unknown_loss, nuclear_norms, variances, gaps = [], [], [], [], []
     for batch in loader:
         batch = batch.to(device)
         out = model(batch.x, batch.edge_index)
@@ -140,15 +183,17 @@ def evaluate(model, loader):
         unknown = ~batch.mask
         known_loss.append(F.mse_loss(out[known], batch.y[known]).item())
         unknown_loss.append(F.mse_loss(out[unknown], batch.y[unknown]).item())
+        _, top_singular, gap = spectral_penalty(out)
         nuclear_norms.append(torch.norm(out, p='nuc').item())
+        gaps.append(gap)
         variances.append(out.var().item())
     return (
         np.mean(known_loss),
         np.mean(unknown_loss),
         np.mean(nuclear_norms),
         np.mean(variances),
+        np.mean(gaps),
     )
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -163,6 +208,9 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.005)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--agg_mode', type=str, choices=['concat', 'mean'], default='concat', help='Aggregation mode for multi-head attention')
+    parser.add_argument('--theta', type=float, default=0.9, help='Weight for the known entry loss vs penalty')
+    parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
+    
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -182,19 +230,45 @@ if __name__ == '__main__':
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    stats = {"train_loss": [], "val_known_loss": [], "val_unknown_loss": [], "nuclear_norm": [], "variance": []}
+    stats = {"train_loss": [], 
+             "val_known_loss": [], "val_unknown_loss": [], 
+             "nuclear_norm": [], "variance": [], "spectral_gap": []}
     file_base = unique_filename()
+    checkpoint_path = f"{file_base}_best_model.pt"
+    
+    best_loss = float('inf')
+    patience_counter = 0
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = train(model, train_loader, optimizer)
-        val_known, val_unknown, nuc, var = evaluate(model, val_loader)
+        train_loss = train(model, train_loader, optimizer, args.theta)
+        val_known, val_unknown, nuc, var, gap = evaluate(model, val_loader)
 
         stats["train_loss"].append(train_loss)
         stats["val_known_loss"].append(val_known)
         stats["val_unknown_loss"].append(val_unknown)
         stats["nuclear_norm"].append(nuc)
         stats["variance"].append(var)
+        stats["spectral_gap"].append(gap)
 
-        print(f"Epoch {epoch:03d} | Train: {train_loss:.4f} | Known: {val_known:.4f} | Unknown: {val_unknown:.4f} | Nuclear: {nuc:.2f} | Var: {var:.4f}")
+        print(f"Epoch {epoch:03d} | Train: {train_loss:.4f} | Known: {val_known:.4f} | Unknown: {val_unknown:.4f} | Nucl: {nuc:.2f} | Gap: {gap:.2f} | Var: {var:.4f}")
+        
+        if val_unknown < best_loss - 1e-5:
+            best_loss = val_unknown
+            patience_counter = 0
+            torch.save(model.state_dict(), checkpoint_path)
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print("Early stopping triggered.")
+                break
+            
+    model.load_state_dict(torch.load(checkpoint_path))
+    print("Loaded best model from checkpoint.")
 
-    plot_stats(stats, file_base)
+    plot_stats(stats, file_base, dataset.nuclear_norm_mean)
+    
+    # Test on fresh data
+    test_dataset = LowRankMatrixGraphDataset(num_graphs=64, n=args.n, m=args.m, r=args.r, density=args.density, sigma=args.sigma)
+    test_loader = DataLoader(test_dataset, batch_size=32)
+    test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(model, test_loader)
+    print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}, Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")

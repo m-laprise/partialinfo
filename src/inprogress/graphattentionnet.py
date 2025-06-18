@@ -1,3 +1,7 @@
+"""
+Dot-product graph attention network tested on Cora dataset and random data, for node classification.
+"""
+
 import argparse
 import math
 import os

@@ -1,3 +1,8 @@
+"""
+Dot product graph attention network for matrix reconstruction; 
+centralized setup where each column is a graph node and co-observed entries correspond to edges.
+"""
+
 import argparse
 import math
 import os

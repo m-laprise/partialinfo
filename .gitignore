@@ -1,5 +1,6 @@
 data/
 runs/
+results/
 Project.toml
 
 # Edit at https://www.toptal.com/developers/gitignore?templates=julia,visualstudiocode,macos,latex,python

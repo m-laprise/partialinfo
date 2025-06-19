@@ -76,7 +76,7 @@ class DotGATLayer(nn.Module):
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
-        self.residual = nn.Linear(in_features, out_features) if in_features != out_features else nn.Identity()
+        #self.residual = nn.Linear(in_features, out_features) if in_features != out_features else nn.Identity()
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
 
@@ -93,7 +93,7 @@ class DotGATLayer(nn.Module):
         alpha = F.softmax(mask, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         out = torch.matmul(alpha, V)
-        return out + self.residual(x)
+        return out #+ self.residual(x)
 
 
 class MultiHeadDotGAT(nn.Module):
@@ -109,7 +109,6 @@ class MultiHeadDotGAT(nn.Module):
         self.norm = nn.LayerNorm(final_in_dim)
         self.swish = Swish()
         self.output = nn.Linear(final_in_dim, output_dim)
-        self.residual = nn.Linear(in_features, final_in_dim) if in_features != final_in_dim else nn.Identity()
         self.dropout = dropout
 
     def forward(self, x):
@@ -117,7 +116,6 @@ class MultiHeadDotGAT(nn.Module):
         x_out = torch.cat(head_outputs, dim=1) if self.agg_mode == 'concat' else torch.stack(head_outputs).mean(dim=0)
         x_out = self.norm(x_out)
         x_out = F.dropout(x_out, p=self.dropout, training=self.training)
-        x_out = x_out + self.residual(x)
         x_out = self.swish(x_out)
         return self.output(x_out)
 
@@ -195,7 +193,7 @@ def spectral_penalty(output, rank):
     s_next = S[rank].item()
     gap = (s_last - s_next) if len(S) > 1 else 0.0
     #ratio = sum_rest / (s_last + 1e-6)
-    penalty = sum_rest - gap #+ ratio
+    penalty = sum_rest - 2*gap #+ ratio
     return penalty, s_last, gap
 
 def agent_diversity_penalty(agent_outputs):
@@ -233,7 +231,7 @@ def train(model, loader, optimizer, theta, criterion, rank, device=torch.device(
             penalty += p
         penalty /= out.shape[0]
         diversity = agent_diversity_penalty(out)  # out: [B, A, D]
-        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.5 * diversity
+        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.2 * diversity
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -319,7 +317,15 @@ def init_weights(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
             
-
+def count_parameters(model):
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total:,}")
+    print("Breakdown by layer:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"{name:60} {param.numel():>10}")
+            
+            
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--n', type=int, default=20)
@@ -363,7 +369,8 @@ if __name__ == '__main__':
         agg_mode='concat'
     ).to(device)
     model.apply(init_weights)
-
+    count_parameters(model)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
     

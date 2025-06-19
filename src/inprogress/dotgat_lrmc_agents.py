@@ -24,17 +24,22 @@ Explicit message passing rounds are controlled by message_steps in DistributedDo
 updates applied iteratively through GAT heads.
 
 Design choices:
-- Currently self.connectivity is shared across all batches, and static per model instance.
+- Currently self.connectivity is shared across all heads and batches, and static per model instance.
     An alternative would be to allow connectivity vary by batch or to depend on inputs/agent embeddings.
-- topk sparsification is static.
+- Topk sparsification is static.
     An alternative would be dynamic thresholding or learned gating. ChatGPT suggests thresholded softmax 
     (Sparsemax or Entmax), attention dropout, learned attention masks, or entropic sparsity.
+- The connectivity matrix is initialized as a sparse adjacency matrix of a small world graph, and this used
+to enforce sparsity throughout training. Initial edges (nonzero in A) are always learnable. 
+Half of the 0 entries are allowed to grow via learning. The rest are frozen at zero through gradient masking.
+    This could be taken out or modified. 
+- Topk and gradient freezing may be redundant sparsity constraints; one of them could be omitted.
 - Agents only weakly specialize through agent-specific embeddings.
     Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
     additional diversity or specialization losses
 - No residual connections.
     Alternative: `h = h + torch.stack(head_outputs).mean(dim=0)` or `h = self.norm(h + ...)`
-- collective aggregation occurs through mean pooling across agents.
+- Collective aggregation occurs through mean pooling across agents.
     Alternatives include:
     attention-based aggregation with a learned attention weight for each agent, 
     aggregate using learned gating, 
@@ -157,16 +162,40 @@ class DistributedDotGAT(nn.Module):
         self.message_steps = message_steps
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
-        
-        # Generate small-world graph with networkx
+            
+        # Generate small-world graph
         G = nx.watts_strogatz_graph(n=num_agents, k=4, p=0.3)
         A = torch.zeros(num_agents, num_agents)
         for i, j in G.edges():
             A[i, j] = 1.0
             A[j, i] = 1.0  # Ensure symmetry
 
+        # Learnable parameter initialized with small noise
+        init_adj = A + 0.01 * torch.randn(num_agents, num_agents)
+        self.connectivity = nn.Parameter(init_adj)
+
+        # Build a mask: 1 for learnable, 0 for frozen
+        mask = (A == 0).float()  # Where connections are missing
+        mask_flat = mask.view(-1)
+        num_candidates = (mask_flat == 1).nonzero(as_tuple=True)[0]
+        perm = torch.randperm(num_candidates.shape[0])
+        num_learnable = perm.shape[0] // 2
+        learnable_idx = num_candidates[perm[:num_learnable]]
+
+        final_mask = torch.ones_like(mask_flat)
+        final_mask[mask_flat == 1] = 0.0  # freeze all zero-edges
+        final_mask[learnable_idx] = 1.0   # unfreeze selected
+
+        self.register_buffer('adj_grad_mask', final_mask.view(num_agents, num_agents))
+
+        # Hook to zero gradients for frozen entries
+        def gradient_mask_hook(grad):
+            return grad * self.adj_grad_mask
+
+        self.connectivity.register_hook(gradient_mask_hook)
+
         # Make it learnable, but initialize with sparse structure
-        self.connectivity = nn.Parameter(A + 0.01 * torch.randn(num_agents, num_agents))
+        #self.connectivity = nn.Parameter(A + 0.01 * torch.randn(num_agents, num_agents))
         
         #self.connectivity = nn.Parameter(torch.randn(num_agents, num_agents))
         self.gat_heads = nn.ModuleList([
@@ -233,6 +262,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                 for _ in range(self.num_agents):
                     # Each agent samples (with replacement) a variable-sized subset 
                     # of the global known entries
+                    # control expected agent overlap by tweaking agent_sample_size range
                     agent_sample_size = np.random.randint(
                         int(0.6 * target_known // self.num_agents),
                         int(1.2 * target_known // self.num_agents) + 1

@@ -117,7 +117,7 @@ def test_training_and_eval_loop(setup_dataset):
 
     loss = train(model, loader, optimizer, theta=0.95, criterion=criterion, device=device)
     assert loss > 0
-    val_known, val_unknown, _, _, _ = evaluate(model, loader, criterion)
+    val_known, val_unknown, _, _, _ = evaluate(model, loader, criterion, 8, 8)
     print(f"Train Loss: {loss:.4f} | Eval Known: {val_known:.4f} | Eval Unknown: {val_unknown:.4f}")
     assert val_known >= 0 and val_unknown >= 0
     print("PASSED: Training and evaluation cycle completed correctly.")
@@ -196,7 +196,7 @@ def test_spectral_penalty_reduces():
     norms = []
     for _ in range(5):
         train(model, loader, optimizer, theta=0.5, criterion=criterion, device=device)
-        _, _, nuclear, _, _ = evaluate(model, loader, criterion)
+        _, _, nuclear, _, _ = evaluate(model, loader, criterion, 8, 8)
         norms.append(nuclear)
     assert norms[-1] <= norms[0] or abs(norms[-1] - norms[0]) < 1e-3
     print("PASSED: Spectral penalty reduces over training.")

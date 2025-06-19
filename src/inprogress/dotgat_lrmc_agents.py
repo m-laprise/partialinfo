@@ -219,15 +219,13 @@ def train(model, loader, optimizer, theta, criterion, device=torch.device('cuda'
     return total_loss / len(loader)
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def evaluate(model, loader, criterion, n, m, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     known_mse, unknown_mse, nuclear_norms, variances, gaps = [], [], [], [], []
 
     for batch in loader:
         batch = batch.to(device)
         batch_size = batch.num_graphs
-        n, m = batch.y.shape[-1] // batch_size // batch.x.shape[1], batch.x.shape[1]
-        nm = n * m
 
         # Forward pass
         out = model(batch.x)  # [batch_size * num_agents, n*m]
@@ -269,7 +267,7 @@ def evaluate(model, loader, criterion, device=torch.device('cuda' if torch.cuda.
     )
 
 @torch.no_grad()
-def evaluate_agent_contributions(model, loader, criterion, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     print("\nEvaluating individual agent contributions...")
     all_agent_errors = []
@@ -278,7 +276,6 @@ def evaluate_agent_contributions(model, loader, criterion, device=torch.device('
         batch = batch.to(device)
         batch_size = batch.num_graphs
         num_agents = batch.x.shape[0] // batch_size
-        n, m = batch.y.shape[-1] // batch_size // num_agents, batch.x.shape[1]
         nm = n * m
 
         out = model(batch.x)  # [batch_size * num_agents, n*m]
@@ -369,7 +366,7 @@ if __name__ == '__main__':
         train_loss = train(
             model, train_loader, optimizer, args.theta, criterion)
         val_known, val_unknown, nuc, var, gap = evaluate(
-            model, val_loader, criterion)
+            model, val_loader, criterion, args.n, args.m)
         
         stats["train_loss"].append(train_loss)
         stats["val_known_mse"].append(val_known)
@@ -403,10 +400,10 @@ if __name__ == '__main__':
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(
-        model, test_loader, criterion)
+        model, test_loader, criterion, args.n, args.m)
     print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}, Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")
 
     # Agent contribution eval (optional)
     if test_unknown < 0.1 or args.eval_agents:
-        evaluate_agent_contributions(model, test_loader, criterion)
+        evaluate_agent_contributions(model, test_loader, criterion, args.n, args.m)
     

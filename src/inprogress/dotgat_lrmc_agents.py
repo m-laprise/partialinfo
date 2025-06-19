@@ -33,7 +33,8 @@ Design choices:
 to enforce sparsity throughout training. Initial edges (nonzero in A) are always learnable. 
 Half of the 0 entries are allowed to grow via learning. The rest are frozen at zero through gradient masking.
     This could be taken out or modified. 
-- Topk and gradient freezing may be redundant sparsity constraints; one of them could be omitted.
+- Topk (listening to only some neighbors) and gradient freezing (structural barriers in connectivity) may
+be redundant sparsity constraints; one of them could be omitted.
 - Agents only weakly specialize through agent-specific embeddings.
     Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
     additional diversity or specialization losses
@@ -56,9 +57,11 @@ per agent along with prediction quality.
 """
 
 import argparse
+import gc
 import math
 import os
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -67,6 +70,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from matplotlib.ticker import MaxNLocator
+from plot_utils import plot_connectivity_matrices
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader
 
@@ -92,9 +96,12 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     axs[0].set_ylabel("Loss")
     axs[0].grid(True)
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axs[1].plot(epochs, stats["val_known_mse"], label="Val MSE Known Entries", color='tab:green')
-    axs[1].plot(epochs, stats["val_unknown_mse"], label="Val MSE Unknown Entries", color='tab:orange')
-    axs[1].plot(epochs, stats["variance"], label="Variance of Reconstructed Entries", color='tab:red')
+    axs[1].plot(epochs, stats["val_known_mse"], 
+                label="Val MSE Known Entries", color='tab:green')
+    axs[1].plot(epochs, stats["val_unknown_mse"], 
+                label="Val MSE Unknown Entries", color='tab:orange')
+    axs[1].plot(epochs, stats["variance"], 
+                label="Variance of Reconstructed Entries", color='tab:red')
     axs[1].set_title("Validation Loss & Variance")
     axs[1].set_xlabel("Epoch")
     axs[1].set_ylabel("Metric")
@@ -108,7 +115,8 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
     ax.plot(epochs, stats["nuclear_norm"], label="Nuclear Norm", color='tab:purple')
     ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap", color='tab:orange')
-    ax.axhline(y=true_nuclear_mean, color='gray', linestyle='--', label="Ground Truth Mean Nuclear Norm")
+    ax.axhline(y=true_nuclear_mean, color='gray', linestyle='--', 
+               label="Ground Truth Mean Nuclear Norm")
     ax.set_title("Spectral Properties Over Epochs")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Singular Value Scale")
@@ -121,7 +129,7 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
 
 
 class DotGATLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.6, topk=5):
+    def __init__(self, in_features, out_features, dropout=0.6, topk=10):
         super().__init__()
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
@@ -159,12 +167,27 @@ class DistributedDotGAT(nn.Module):
                  num_heads, dropout, message_steps=3):
         super().__init__()
         self.num_agents = num_agents
+        self.hidden_dim = hidden_dim
         self.message_steps = message_steps
         self.input_proj = nn.Linear(input_dim, hidden_dim)
-        self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
+        #v1:self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
+        #v2:self.agent_input_projs = nn.ModuleList([
+        #    nn.Linear(input_dim, hidden_dim, bias=False) for _ in range(num_agents)
+        #])
+        pos_emb_dim = 32
+        self.position_embedding = nn.Embedding(input_dim, pos_emb_dim)
+        self.value_projection = nn.Linear(1, pos_emb_dim)
+        self.token_proj = nn.Sequential(
+            nn.Linear(pos_emb_dim, hidden_dim),
+            Swish()
+        )
+        self.aggregator = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            Swish()
+        )
             
         # Generate small-world graph
-        G = nx.watts_strogatz_graph(n=num_agents, k=4, p=0.3)
+        G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
         A = torch.zeros(num_agents, num_agents)
         for i, j in G.edges():
             A[i, j] = 1.0
@@ -193,11 +216,7 @@ class DistributedDotGAT(nn.Module):
             return grad * self.adj_grad_mask
 
         self.connectivity.register_hook(gradient_mask_hook)
-
-        # Make it learnable, but initialize with sparse structure
-        #self.connectivity = nn.Parameter(A + 0.01 * torch.randn(num_agents, num_agents))
         
-        #self.connectivity = nn.Parameter(torch.randn(num_agents, num_agents))
         self.gat_heads = nn.ModuleList([
             DotGATLayer(hidden_dim, hidden_dim, dropout=dropout, topk=5)
             for _ in range(num_heads)
@@ -208,7 +227,45 @@ class DistributedDotGAT(nn.Module):
 
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
-        h = self.input_proj(x) + self.agent_embeddings.unsqueeze(0)  # Inject identity
+        #v1:h = self.input_proj(x) + self.agent_embeddings.unsqueeze(0)  # Inject identity
+        #v2:h = torch.stack([
+        #    self.agent_input_projs[i](x[:, i, :])  # [batch, hidden_dim] for agent i
+        #    for i in range(self.num_agents)
+        #], dim=1)  # -> [batch, num_agents, hidden_dim]
+        B, A, D = x.shape  # [batch, num_agents, n*m]
+        device = x.device
+
+        states = []
+        # For each agent’s input vector x \in \mathbb{R}^{n \times m}:
+        #1.	Extract non-zero values and indices.
+        #2.	Use a positional encoder: e.g., learnable embedding or sinusoidal positional encodings.
+        #3.	Combine position and value into token embeddings: e_i = f(value_i, position_i)
+        #4.	Aggregate these into a fixed-size state vector per agent
+        for agent_id in range(self.num_agents):
+            agent_inputs = x[:, agent_id, :]  # [B, n*m]
+
+            nonzero_mask = agent_inputs != 0  # [B, n*m]
+            values = agent_inputs[nonzero_mask].unsqueeze(-1)  # [total_tokens, 1]
+            positions = torch.arange(D, device=device).repeat(B, 1)[nonzero_mask]  # [total_tokens]
+
+            # Project position and value
+            val_enc = self.value_projection(values)  # [tokens, dim]
+            pos_enc = self.position_embedding(positions)  # [tokens, dim]
+            token_embeds = self.token_proj(val_enc + pos_enc)  # [tokens, hidden_dim]
+
+            # Aggregate: mean pooling per batch sample
+            # Recover sample indices from flattened mask
+            counts = nonzero_mask.sum(dim=1)  # shape: [B], type: torch.Tensor
+            batch_idx = torch.arange(B, device=device).repeat_interleave(counts)
+            agent_embed = torch.zeros(B, self.hidden_dim, device=device).index_add_(
+                0, batch_idx, token_embeds
+            )
+            norm_factors = nonzero_mask.sum(dim=1).clamp(min=1).unsqueeze(1)
+            agent_embed /= norm_factors  # [B, hidden_dim]
+
+            states.append(agent_embed)
+
+        h = torch.stack(states, dim=1)  # [B, A, hidden_dim]
 
         for _ in range(self.message_steps):
             head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
@@ -256,7 +313,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             # Build observed tensor with zeros at unknowns
             observed_tensor = M_tensor.clone()
             observed_tensor[~global_mask] = 0.0
-            # === Agent-specific views ===
+            # Agent-specific views
             if self.view_mode == 'sparse':
                 features = []
                 for _ in range(self.num_agents):
@@ -286,7 +343,6 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         return self.collate(data_list)
 
 
-
 def spectral_penalty(output, rank, evalmode=False):
     """
     Compute spectral penalty for a low rank matrix output.
@@ -310,8 +366,12 @@ def spectral_penalty(output, rank, evalmode=False):
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
     gap = (s_last - s_next) if len(S) > 1 else 0.0
-    #ratio = sum_rest / (s_last + 1e-6)
-    penalty = sum_rest - 2*gap #+ ratio
+    ratio = sum_rest / (s_last + 1e-6)
+    penalty = sum_rest + ratio #- 2*gap
+    if s_last > 2 * min(output.shape):
+        penalty += (s_last - 2 * min(output.shape)) ** 2
+    elif s_last < min(output.shape) / 2:
+        penalty += (min(output.shape) / 2 - s_last) ** 2
     if evalmode:
         return gap
     else:
@@ -334,7 +394,8 @@ def agent_diversity_penalty(agent_outputs):
         pairwise_sim = sim[mask].view(A, -1)
         return pairwise_sim.mean()
 
-def train(model, loader, optimizer, theta, criterion, rank, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def train(model, loader, optimizer, theta, criterion, rank, 
+          device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -351,7 +412,7 @@ def train(model, loader, optimizer, theta, criterion, rank, device=torch.device(
             spectral_penalty(out[i], rank) for i in range(batch_size)
         ) / batch_size
         diversity = agent_diversity_penalty(out)  # out: [B, A, D]
-        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.2 * diversity
+        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.4 * diversity
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -360,7 +421,8 @@ def train(model, loader, optimizer, theta, criterion, rank, device=torch.device(
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, n, m, rank, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def evaluate(model, loader, criterion, n, m, rank, 
+             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     known_mse, unknown_mse, nuclear_norms, variances, gaps = [], [], [], [], []
     for batch in loader:
@@ -400,7 +462,8 @@ def evaluate(model, loader, criterion, n, m, rank, device=torch.device('cuda' if
 
 
 @torch.no_grad()
-def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def evaluate_agent_contributions(model, loader, criterion, n, m, 
+                                 device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     print("\nEvaluating individual agent contributions...")
     all_agent_errors = []
@@ -433,7 +496,7 @@ def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.de
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight)
+        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)
             
@@ -509,6 +572,13 @@ if __name__ == '__main__':
     
     best_loss = float('inf')
     patience_counter = 0
+    
+    with torch.no_grad():
+        batch = next(iter(train_loader)).to(device)
+        x = batch.x.view(batch.num_graphs, model.num_agents, -1)
+        out = model(x)
+        recon = out.mean(dim=1)
+        print("Initial output variance:", recon.var().item())
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
@@ -523,19 +593,30 @@ if __name__ == '__main__':
         stats["variance"].append(var)
         stats["spectral_gap"].append(gap)
         
-        print(f"Epoch {epoch:03d} | Train: {train_loss:.4f} | Known: {val_known:.4f} | Unknown: {val_unknown:.4f} | Nucl: {nuc:.2f} | Gap: {gap:.2f} | Var: {var:.4f}")
+        print(f"Epoch {epoch:03d} | Train: {train_loss:.4f} | Known: {val_known:.4f} | "+
+            f"Unknown: {val_unknown:.4f} | Nucl: {nuc:.2f} | Gap: {gap:.2f} | Var: {var:.4f}")
         
-        if val_known < best_loss - 1e-5:
-            best_loss = val_known
+        # Save connectivity matrix for visualization
+        #adj_matrix = model.connectivity.detach().cpu().numpy()
+        #np.save(f"{file_base}_adj_epoch{epoch}.npy", adj_matrix)
+        
+        if val_unknown < best_loss - 1e-5:
+            best_loss = val_unknown
             patience_counter = 0
             torch.save(model.state_dict(), checkpoint_path)
+            
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
                 print(f"Early stopping at epoch {epoch}.")
                 break
 
+    # Clear memory (avoid OOM) and load best model
+    optimizer.zero_grad(set_to_none=True)
+    gc.collect()
+    torch.cuda.empty_cache()
     model.load_state_dict(torch.load(checkpoint_path))
+    model.to(device)
     print("Loaded best model from checkpoint.")
 
     plot_stats(stats, file_base, dataset.nuclear_norm_mean)
@@ -549,7 +630,11 @@ if __name__ == '__main__':
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(
         model, test_loader, criterion, args.n, args.m, args.r)
-    print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}, Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")
+    print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}"+
+        f" Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")
+
+    #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
+    #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
 
     # Agent contribution eval (optional)
     if test_unknown < 0.1 or args.eval_agents:

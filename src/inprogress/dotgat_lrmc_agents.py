@@ -85,7 +85,12 @@ class DotGATLayer(nn.Module):
         K = self.k_proj(x)
         V = self.v_proj(x)
         scores = torch.matmul(Q, K.T) / self.scale
-        alpha = F.softmax(scores, dim=-1)
+        #alpha = F.softmax(scores, dim=-1)
+        topk = 5
+        topk_vals, topk_idx = torch.topk(scores, k=topk, dim=-1)
+        mask = scores.new_full(scores.shape, float('-inf'))
+        mask.scatter_(dim=-1, index=topk_idx, src=topk_vals)
+        alpha = F.softmax(mask, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         out = torch.matmul(alpha, V)
         return out + self.residual(x)
@@ -188,13 +193,8 @@ def spectral_penalty(output, rank):
     sum_rest = S[rank:].sum()
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
-    #N = min(output.shape)
-    #if s0 > 2 * N:
-    #    penalty += (s0 - 2 * N) ** 2
-    #elif s0 < N / 2:
-    #    penalty += (N / 2 - s0) ** 2
     gap = (s_last - s_next) if len(S) > 1 else 0.0
-    ratio = sum_rest / (s_last + 1e-6)
+    #ratio = sum_rest / (s_last + 1e-6)
     penalty = sum_rest - gap #+ ratio
     return penalty, s_last, gap
 
@@ -233,7 +233,7 @@ def train(model, loader, optimizer, theta, criterion, rank, device=torch.device(
             penalty += p
         penalty /= out.shape[0]
         diversity = agent_diversity_penalty(out)  # out: [B, A, D]
-        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.01 * diversity
+        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.5 * diversity
         loss.backward()
         #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()

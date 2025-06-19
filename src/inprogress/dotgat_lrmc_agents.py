@@ -1,5 +1,5 @@
 """
-Dot product graph attention network for dsitributed matrix completion, 
+Dot product graph attention network for distributed matrix completion, 
 with learned agent-based message passing setup.
 Supports both sparse views and low-dimensional projections as agent inputs.
 
@@ -76,16 +76,16 @@ class DotGATLayer(nn.Module):
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
-        #self.residual = nn.Linear(in_features, out_features) if in_features != out_features else nn.Identity()
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
+        self.norm = nn.LayerNorm(out_features)
 
     def forward(self, x):
         Q = self.q_proj(x)
         K = self.k_proj(x)
         V = self.v_proj(x)
         scores = torch.matmul(Q, K.T) / self.scale
-        #alpha = F.softmax(scores, dim=-1)
+        # Attention with top-k sparsification
         topk = 5
         topk_vals, topk_idx = torch.topk(scores, k=topk, dim=-1)
         mask = scores.new_full(scores.shape, float('-inf'))
@@ -93,10 +93,15 @@ class DotGATLayer(nn.Module):
         alpha = F.softmax(mask, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         out = torch.matmul(alpha, V)
+        out = self.norm(out)
         return out #+ self.residual(x)
 
 
-class MultiHeadDotGAT(nn.Module):
+class CentralizedMultiHeadDotGAT(nn.Module):
+    """
+    This architecture ignores any distributed structure of the input graph and treats it as a unique input.
+    The number of trainable parameters does not vary with the number of agents.
+    """
     def __init__(self, in_features, hidden_features, output_dim, num_heads, dropout, agg_mode='concat'):
         super().__init__()
         assert agg_mode in ['concat', 'mean']
@@ -106,7 +111,7 @@ class MultiHeadDotGAT(nn.Module):
         ])
         self.agg_mode = agg_mode
         final_in_dim = hidden_features * num_heads if agg_mode == 'concat' else hidden_features
-        self.norm = nn.LayerNorm(final_in_dim)
+        #self.norm = nn.LayerNorm(final_in_dim)
         self.swish = Swish()
         self.output = nn.Linear(final_in_dim, output_dim)
         self.dropout = dropout
@@ -114,7 +119,6 @@ class MultiHeadDotGAT(nn.Module):
     def forward(self, x):
         head_outputs = [head(x) for head in self.heads]
         x_out = torch.cat(head_outputs, dim=1) if self.agg_mode == 'concat' else torch.stack(head_outputs).mean(dim=0)
-        x_out = self.norm(x_out)
         x_out = F.dropout(x_out, p=self.dropout, training=self.training)
         x_out = self.swish(x_out)
         return self.output(x_out)

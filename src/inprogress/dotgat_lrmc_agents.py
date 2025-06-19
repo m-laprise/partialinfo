@@ -368,33 +368,34 @@ def spectral_penalty(output, rank, evalmode=False):
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
     gap = (s_last - s_next) if len(S) > 1 else 0.0
+    svdcount = len(S) # or min(output.shape)
     #ratio = sum_rest / (s_last + 1e-6)
-    penalty = sum_rest - 10*gap #+ ratio #
-    if s_last > 2 * min(output.shape):
-        penalty += (s_last - 2 * min(output.shape)) ** 2
-    elif s_last < min(output.shape) / 2:
-        penalty += (min(output.shape) / 2 - s_last) ** 2
+    penalty = sum_rest/svdcount - gap #+ ratio #
+    if s_last > 2 * svdcount:
+        penalty += (s_last - 2 * svdcount) ** 2
+    elif s_last < svdcount / 2:
+        penalty += (svdcount / 2 - s_last) ** 2
     if evalmode:
         return gap
     else:
         return penalty
 
-def agent_diversity_penalty(agent_outputs):
-    # agent_outputs: [num_agents, n*m] or [batch_size, num_agents, n*m]
-    if agent_outputs.dim() == 3:
-        B, A, D = agent_outputs.shape
-        agent_outputs = F.normalize(agent_outputs, dim=-1)  # cosine space
-        sim = torch.matmul(agent_outputs, agent_outputs.transpose(1, 2))  # [B, A, A]
-        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
-        pairwise_sim = sim[:, mask].view(B, -1)  # remove diagonal
-        return pairwise_sim.mean()
-    else:
-        A, D = agent_outputs.shape
-        agent_outputs = F.normalize(agent_outputs, dim=-1)
-        sim = torch.matmul(agent_outputs, agent_outputs.T)  # [A, A]
-        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
-        pairwise_sim = sim[mask].view(A, -1)
-        return pairwise_sim.mean()
+#def agent_diversity_penalty(agent_outputs):
+#    # agent_outputs: [num_agents, n*m] or [batch_size, num_agents, n*m]
+#    if agent_outputs.dim() == 3:
+#        B, A, D = agent_outputs.shape
+#        agent_outputs = F.normalize(agent_outputs, dim=-1)  # cosine space
+#        sim = torch.matmul(agent_outputs, agent_outputs.transpose(1, 2))  # [B, A, A]
+#        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
+#        pairwise_sim = sim[:, mask].view(B, -1)  # remove diagonal
+#        return pairwise_sim.mean()
+#    else:
+#        A, D = agent_outputs.shape
+#        agent_outputs = F.normalize(agent_outputs, dim=-1)
+#        sim = torch.matmul(agent_outputs, agent_outputs.T)  # [A, A]
+#        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
+#        pairwise_sim = sim[mask].view(A, -1)
+#        return pairwise_sim.mean()
 
 def train(model, loader, optimizer, theta, criterion, rank, 
           device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
@@ -413,11 +414,12 @@ def train(model, loader, optimizer, theta, criterion, rank,
         penalty = sum(
             spectral_penalty(out[i], rank) for i in range(batch_size)
         ) / batch_size
-        diversity = agent_diversity_penalty(out)  # out: [B, A, D]
-        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.5 * diversity
-        #target_var = 1.0
-        #var_penalty = F.mse_loss(out.var(), torch.tensor(target_var).to(out.device))
-        #loss += 0.2 * var_penalty
+        #diversity = agent_diversity_penalty(out)  # out: [B, A, D]
+        loss = theta * reconstructionloss + (1 - theta) * penalty
+        # Uncomment following lines to try variance penalty.
+        # This seems to prevent learning any useful solutions for the other components of the loss
+        #var_penalty = F.mse_loss(out.var(), torch.tensor(1.0).to(out.device))
+        #loss += 0.5 * var_penalty
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -501,7 +503,7 @@ def evaluate_agent_contributions(model, loader, criterion, n, m,
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight, gain=30.0)
+        nn.init.xavier_uniform_(m.weight, gain=10.0)
         #nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)

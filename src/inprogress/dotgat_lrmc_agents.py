@@ -9,21 +9,19 @@ Each agent independently receives their own masked view of the matrix via
 AgentMatrixReconstructionDataset (x: [batch, num_agents, input_dim]). 
 
 During message passing, each DotGATLayer uses dot-product attention with a learned 
-connectivity matrix and applies top-k sparsification, ensuring localized neighbor communication.
+connectivity matrix, ensuring localized neighbor communication.
 Aggregation only occurs after message passing and is mediated via the GAT network to prevent
 information leakage.
 
 self.connectivity is a trainable nn.Parameter representing the agent-to-agent communication graph.
-The attention computation adds this weighted adjacency matrix to the attention logits, making the 
-interactions learnable.
-
-self.agent_embeddings adds agent-specific vectors into the processing.
-During training and inference, each agent maintains separate outputs that are optionally aggregated.
+The attention computation adds this weighted adjacency matrix to the attention logits.
 
 Explicit message passing rounds are controlled by message_steps in DistributedDotGAT, with message 
 updates applied iteratively through GAT heads.
 
 Design choices:
+- *Positional embeddings*: Agent specific positional embeddings of the sparse entries they see
+are required, but not well implemented.
 - *Adjacency matrix is not input-dependent*: 
 Currently self.connectivity is shared across all heads and batches, and static per model instance.
     An alternative would be to allow connectivity vary by batch or to depend on inputs/agent embeddings.
@@ -50,7 +48,7 @@ The rest are frozen at zero through gradient masking.
 
 Required improvements:
 - Save and plot connectivity matrix over time
-- Spectral penalty is unstable. ChatGPT suggests eplacing gap-based penalty with nuclear norm clipping, 
+- Spectral penalty is unstable. ChatGPT suggests replacing with nuclear norm clipping, 
 differentiable low-rank approximations, or penalizing condition number.
 - Log agent_diversity_penalty during training to track changes in agent roles
 - Per-agent MSE should be correlated with agent input quality/sparsity. Integrate tracking input sparsity 

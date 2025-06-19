@@ -129,7 +129,7 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
 
 
 class DotGATLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.6, topk=10):
+    def __init__(self, in_features, out_features, dropout):
         super().__init__()
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
@@ -137,7 +137,6 @@ class DotGATLayer(nn.Module):
         self.norm = nn.LayerNorm(out_features)
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
-        self.topk = topk
     
     def forward(self, x, connectivity):
         # x: [batch_size, num_agents, hidden_dim]

@@ -134,6 +134,7 @@ class DotGATLayer(nn.Module):
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
+        self.forward_proj = nn.Linear(out_features, out_features)
         self.norm = nn.LayerNorm(out_features)
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
@@ -156,7 +157,8 @@ class DotGATLayer(nn.Module):
         alpha = F.softmax(scores, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
-        out = torch.matmul(alpha, V)  # [B, A, hidden_dim]
+        H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
+        out = self.forward_proj(H)
         return self.norm(out)
 
 
@@ -217,7 +219,7 @@ class DistributedDotGAT(nn.Module):
         self.connectivity.register_hook(gradient_mask_hook)
         
         self.gat_heads = nn.ModuleList([
-            DotGATLayer(hidden_dim, hidden_dim, dropout=dropout, topk=5)
+            DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
             for _ in range(num_heads)
         ])
         final_dim = hidden_dim

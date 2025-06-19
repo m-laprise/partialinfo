@@ -3,7 +3,51 @@ Dot product graph attention network for distributed matrix completion,
 with learned agent-based message passing setup.
 Supports both sparse views and low-dimensional projections as agent inputs.
 
-Currently, view-mode 'sparse' runs, but view-mode 'project' needs to be debugged.
+(Currently, view-mode 'sparse' runs, but view-mode 'project' needs to be debugged.)
+
+Each agent independently receives their own masked view of the matrix via 
+AgentMatrixReconstructionDataset (x: [batch, num_agents, input_dim]). 
+
+During message passing, each DotGATLayer uses dot-product attention with a learned 
+connectivity matrix and applies top-k sparsification, ensuring localized neighbor communication.
+Aggregation only occurs after message passing and is mediated via the GAT network to prevent
+information leakage.
+
+self.connectivity is a trainable nn.Parameter representing the agent-to-agent communication graph.
+The attention computation adds this weighted adjacency matrix to the attention logits, making the 
+interactions learnable.
+
+self.agent_embeddings adds agent-specific vectors into the processing.
+During training and inference, each agent maintains separate outputs that are optionally aggregated.
+
+Explicit message passing rounds are controlled by message_steps in DistributedDotGAT, with message 
+updates applied iteratively through GAT heads.
+
+Design choices:
+- Currently self.connectivity is shared across all batches, and static per model instance.
+    An alternative would be to allow connectivity vary by batch or to depend on inputs/agent embeddings.
+- topk sparsification is static.
+    An alternative would be dynamic thresholding or learned gating. ChatGPT suggests thresholded softmax 
+    (Sparsemax or Entmax), attention dropout, learned attention masks, or entropic sparsity.
+- Agents only weakly specialize through agent-specific embeddings.
+    Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
+    additional diversity or specialization losses
+- No residual connections.
+    Alternative: `h = h + torch.stack(head_outputs).mean(dim=0)` or `h = self.norm(h + ...)`
+- collective aggregation occurs through mean pooling across agents.
+    Alternatives include:
+    attention-based aggregation with a learned attention weight for each agent, 
+    aggregate using learned gating, 
+    game-theoretic aggregation of subsets of agents based on utility or diversity contribution
+
+Required improvements:
+- Save and plot connectivity matrix over time
+- Spectral penalty is unstable. ChatGPT suggests eplacing gap-based penalty with nuclear norm clipping, 
+differentiable low-rank approximations, or penalizing condition number.
+- Log agent_diversity_penalty during training to track changes in agent roles
+- Per-agent MSE should be correlated with agent input quality/sparsity. Integrate tracking input sparsity 
+per agent along with prediction quality.
+- Develop view_mode='project' and make projections learnable (e.g., per-agent linear layers).
 """
 
 import argparse
@@ -12,6 +56,7 @@ import os
 from datetime import datetime
 
 import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
@@ -71,57 +116,78 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
 
 
 class DotGATLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.6):
+    def __init__(self, in_features, out_features, dropout=0.6, topk=5):
         super().__init__()
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
+        self.norm = nn.LayerNorm(out_features)
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
-        self.norm = nn.LayerNorm(out_features)
+        self.topk = topk
 
-    def forward(self, x):
-        Q = self.q_proj(x)
-        K = self.k_proj(x)
-        V = self.v_proj(x)
-        scores = torch.matmul(Q, K.T) / self.scale
-        # Attention with top-k sparsification
-        topk = 5
-        topk_vals, topk_idx = torch.topk(scores, k=topk, dim=-1)
+    def forward(self, x, connectivity):
+        # x: [batch_size, num_agents, hidden_dim]
+        B, A, H = x.shape
+        x = x.view(B * A, H)  # Flatten batch and agents
+        # Compute query, key, and value matrices
+        Q = self.q_proj(x).view(B, A, -1)
+        K = self.k_proj(x).view(B, A, -1)
+        V = self.v_proj(x).view(B, A, -1)
+        # Compute scaled dot-product attention scores
+        scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
+        scores = scores + connectivity  # [B, A, A]
+        # Apply attention with top-k sparsification
+        topk_vals, topk_idx = torch.topk(scores, self.topk, dim=-1)
         mask = scores.new_full(scores.shape, float('-inf'))
         mask.scatter_(dim=-1, index=topk_idx, src=topk_vals)
+
         alpha = F.softmax(mask, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        out = torch.matmul(alpha, V)
-        out = self.norm(out)
-        return out #+ self.residual(x)
+
+        out = torch.matmul(alpha, V)  # [B, A, hidden_dim]
+        return self.norm(out)
 
 
-class CentralizedMultiHeadDotGAT(nn.Module):
-    """
-    This architecture ignores any distributed structure of the input graph and treats it as a unique input.
-    The number of trainable parameters does not vary with the number of agents.
-    """
-    def __init__(self, in_features, hidden_features, output_dim, num_heads, dropout, agg_mode='concat'):
+class DistributedDotGAT(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_agents, 
+                 num_heads, dropout, message_steps=3):
         super().__init__()
-        assert agg_mode in ['concat', 'mean']
-        self.heads = nn.ModuleList([
-            DotGATLayer(in_features, hidden_features, dropout=dropout)
+        self.num_agents = num_agents
+        self.message_steps = message_steps
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
+        
+        # Generate small-world graph with networkx
+        G = nx.watts_strogatz_graph(n=num_agents, k=4, p=0.3)
+        A = torch.zeros(num_agents, num_agents)
+        for i, j in G.edges():
+            A[i, j] = 1.0
+            A[j, i] = 1.0  # Ensure symmetry
+
+        # Make it learnable, but initialize with sparse structure
+        self.connectivity = nn.Parameter(A + 0.01 * torch.randn(num_agents, num_agents))
+        
+        #self.connectivity = nn.Parameter(torch.randn(num_agents, num_agents))
+        self.gat_heads = nn.ModuleList([
+            DotGATLayer(hidden_dim, hidden_dim, dropout=dropout, topk=5)
             for _ in range(num_heads)
         ])
-        self.agg_mode = agg_mode
-        final_in_dim = hidden_features * num_heads if agg_mode == 'concat' else hidden_features
-        #self.norm = nn.LayerNorm(final_in_dim)
+        final_dim = hidden_dim
         self.swish = Swish()
-        self.output = nn.Linear(final_in_dim, output_dim)
-        self.dropout = dropout
+        self.output_proj = nn.Linear(final_dim, output_dim)
 
     def forward(self, x):
-        head_outputs = [head(x) for head in self.heads]
-        x_out = torch.cat(head_outputs, dim=1) if self.agg_mode == 'concat' else torch.stack(head_outputs).mean(dim=0)
-        x_out = F.dropout(x_out, p=self.dropout, training=self.training)
-        x_out = self.swish(x_out)
-        return self.output(x_out)
+        # x: [batch, num_agents, input_dim]
+        h = self.input_proj(x) + self.agent_embeddings.unsqueeze(0)  # Inject identity
+
+        for _ in range(self.message_steps):
+            head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
+            h = torch.stack(head_outputs).mean(dim=0)
+            h = self.swish(F.dropout(h, p=0.3, training=self.training))
+
+        out = self.output_proj(h)
+        return out  # [batch, num_agents, output_dim]
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
@@ -143,37 +209,55 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
     def _generate(self):
         data_list = []
         norms = []
+        total_entries = self.n * self.m
+        target_known = int(self.density * total_entries)
         for _ in range(self.num_graphs):
+            # Low-rank matrix with Gaussian noise
             U = np.random.randn(self.n, self.r) / np.sqrt(self.r)
             V = np.random.randn(self.m, self.r) / np.sqrt(self.r)
             M = U @ V.T + self.sigma * np.random.randn(self.n, self.m)
-            mask = np.random.rand(self.n, self.m) < self.density
-            observed = M * mask
-            M_tensor = torch.tensor(M, dtype=torch.float).view(-1)
-            mask_tensor = torch.tensor(mask, dtype=torch.bool).view(-1)
-            norms.append(torch.linalg.norm(torch.tensor(M, dtype=torch.float), ord='nuc').item())
+            M_tensor = torch.tensor(M, dtype=torch.float32).view(-1)
+            norms.append(torch.linalg.norm(M_tensor.view(self.n, self.m), ord='nuc').item())
+            # Controlled global known vs secret mask
+            all_indices = torch.randperm(total_entries)
+            known_global_idx = all_indices[:target_known]
+            global_mask = torch.zeros(total_entries, dtype=torch.bool)
+            global_mask[known_global_idx] = True
+            mask_tensor = global_mask.clone()
+            # Build observed tensor with zeros at unknowns
+            observed_tensor = M_tensor.clone()
+            observed_tensor[~global_mask] = 0.0
+            # === Agent-specific views ===
             if self.view_mode == 'sparse':
-                observed_tensor = torch.tensor(observed, dtype=torch.float).view(-1)
                 features = []
                 for _ in range(self.num_agents):
-                    agent_mask = torch.rand(self.n * self.m) < self.density
-                    agent_view = observed_tensor.clone()
-                    agent_view[~agent_mask] = 0.0
+                    # Each agent samples (with replacement) a variable-sized subset 
+                    # of the global known entries
+                    agent_sample_size = np.random.randint(
+                        int(0.6 * target_known // self.num_agents),
+                        int(1.2 * target_known // self.num_agents) + 1
+                    )
+                    sample_idx = known_global_idx[
+                        torch.randint(len(known_global_idx), (agent_sample_size,))
+                    ]
+                    agent_view = torch.zeros(total_entries, dtype=torch.float32)
+                    agent_view[sample_idx] = observed_tensor[sample_idx]
                     features.append(agent_view)
                 x = torch.stack(features)
-            else:  # projection
-                observed_tensor = torch.tensor(observed, dtype=torch.float).view(-1)
+            else:  # projection view
                 x = torch.stack([
-                    torch.matmul(torch.randn(self.input_dim, self.n * self.m), observed_tensor)
+                    torch.matmul(torch.randn(self.input_dim, total_entries), observed_tensor)
                     for _ in range(self.num_agents)
                 ])
+            # Create Data object
             data = Data(x=x, y=M_tensor, mask=mask_tensor)
             data_list.append(data)
         self.nuclear_norm_mean = np.mean(norms)
         return self.collate(data_list)
 
 
-def spectral_penalty(output, rank):
+
+def spectral_penalty(output, rank, evalmode=False):
     """
     Compute spectral penalty for a low rank matrix output.
     
@@ -198,7 +282,10 @@ def spectral_penalty(output, rank):
     gap = (s_last - s_next) if len(S) > 1 else 0.0
     #ratio = sum_rest / (s_last + 1e-6)
     penalty = sum_rest - 2*gap #+ ratio
-    return penalty, s_last, gap
+    if evalmode:
+        return gap
+    else:
+        return penalty
 
 def agent_diversity_penalty(agent_outputs):
     # agent_outputs: [num_agents, n*m] or [batch_size, num_agents, n*m]
@@ -224,16 +311,15 @@ def train(model, loader, optimizer, theta, criterion, rank, device=torch.device(
         batch = batch.to(device)
         optimizer.zero_grad()
         batch_size = batch.num_graphs
-        out = model(batch.x)  # [batch_size * num_agents, n*m]
-        out = out.view(batch_size, -1, out.shape[-1])  # [batch_size, num_agents, n*m]
-        prediction = out.mean(dim=1)  # [batch_size, n*m] # Collective prediction: mean
+        x = batch.x 
+        x = x.view(batch_size, model.num_agents, -1)
+        out = model(x) 
+        prediction = out.mean(dim=1)
         target = batch.y.view(batch_size, -1)
         reconstructionloss = criterion(prediction, target)
-        penalty = 0.0
-        for i in range(out.shape[0]):  # batch size
-            p, _, _ = spectral_penalty(out[i], rank)  # [num_agents, n*m] per sample
-            penalty += p
-        penalty /= out.shape[0]
+        penalty = sum(
+            spectral_penalty(out[i], rank) for i in range(batch_size)
+        ) / batch_size
         diversity = agent_diversity_penalty(out)  # out: [B, A, D]
         loss = theta * reconstructionloss + (1 - theta) * penalty + 0.2 * diversity
         loss.backward()
@@ -251,8 +337,8 @@ def evaluate(model, loader, criterion, n, m, rank, device=torch.device('cuda' if
         batch = batch.to(device)
         batch_size = batch.num_graphs
         # Forward pass
-        out = model(batch.x)  # [batch_size * num_agents, n*m]
-        out = out.view(batch_size, -1, out.shape[-1])  # [batch_size, num_agents, n*m]
+        x = batch.x.view(batch_size, model.num_agents, -1)
+        out = model(x)
         prediction = out.mean(dim=1)  # [batch_size, n*m]
         target = batch.y.view(batch_size, -1)  # [batch_size, n*m]
         mask = batch.mask.view(batch_size, -1)  # [batch_size, n*m]
@@ -270,7 +356,7 @@ def evaluate(model, loader, criterion, n, m, rank, device=torch.device('cuda' if
             matrix_2d = pred_i.view(n, m)
             nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
             # Spectral penalty metrics
-            _, _, gap = spectral_penalty(out[i], rank)  # [num_agents, n*m]
+            gap = spectral_penalty(out[i], rank, evalmode=True)  # [num_agents, n*m]
             gaps.append(gap)
             # Variance of the agent outputs
             variances.append(out[i].var().item())
@@ -293,8 +379,8 @@ def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.de
         batch_size = batch.num_graphs
         num_agents = batch.x.shape[0] // batch_size
         nm = n * m
-        out = model(batch.x)  # [batch_size * num_agents, n*m]
-        out = out.view(batch_size, num_agents, nm)  # [B, A, n*m]
+        x = batch.x.view(batch_size, model.num_agents, -1)
+        out = model(x)
         targets = batch.y.view(batch_size, nm)      # [B, n*m]
         for i in range(batch_size):
             individual_errors = []
@@ -321,6 +407,7 @@ def init_weights(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
             
+            
 def count_parameters(model):
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total:,}")
@@ -344,11 +431,11 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=16)
-    #parser.add_argument('--agg_mode', type=str, choices=['concat', 'mean'], default='concat', help='Aggregation mode for multi-head attention')
     parser.add_argument('--theta', type=float, default=0.95, help='Weight for the known entry loss vs penalty')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--view_mode', type=str, choices=['sparse', 'project'], default='sparse')
     parser.add_argument('--eval_agents', action='store_true', help='Always evaluate agent contributions')
+    parser.add_argument('--steps', type=int, default=3, help='Number of message passing steps')
     
     args = parser.parse_args()
 
@@ -364,13 +451,14 @@ if __name__ == '__main__':
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=args.batch_size)
 
-    model = MultiHeadDotGAT(
-        in_features=dataset.input_dim,
-        hidden_features=args.hidden_dim,
+    model = DistributedDotGAT(
+        input_dim=dataset.input_dim,
+        hidden_dim=args.hidden_dim,
         output_dim=dataset.n * dataset.m,
+        num_agents=args.num_agents,
         num_heads=args.num_heads,
         dropout=args.dropout,
-        agg_mode='concat'
+        message_steps=args.steps
     ).to(device)
     model.apply(init_weights)
     count_parameters(model)

@@ -24,20 +24,22 @@ Explicit message passing rounds are controlled by message_steps in DistributedDo
 updates applied iteratively through GAT heads.
 
 Design choices:
-- Currently self.connectivity is shared across all heads and batches, and static per model instance.
+- *Adjacency matrix is not input-dependent*: 
+Currently self.connectivity is shared across all heads and batches, and static per model instance.
     An alternative would be to allow connectivity vary by batch or to depend on inputs/agent embeddings.
-- Topk sparsification is static.
-    An alternative would be dynamic thresholding or learned gating. ChatGPT suggests thresholded softmax 
+- *Sparsity of adjacency matrix*: 
+The connectivity matrix is initialized as a sparse adjacency matrix of a small world graph, and used
+to enforce sparsity throughout training via gradient freezing (structural barriers in connectivity). 
+Initial edges (nonzero in A) are always learnable. Half of the 0 entries are allowed to grow via learning. 
+The rest are frozen at zero through gradient masking.
+    - This could be taken out or modified. 
+    - An alternative (which is in a previous version in Github) is top-k sparsification (listening to only some 
+    neighbors), which is also static.
+    - Other alternatives would be dynamic thresholding or learned gating. ChatGPT suggests thresholded softmax 
     (Sparsemax or Entmax), attention dropout, learned attention masks, or entropic sparsity.
-- The connectivity matrix is initialized as a sparse adjacency matrix of a small world graph, and this used
-to enforce sparsity throughout training. Initial edges (nonzero in A) are always learnable. 
-Half of the 0 entries are allowed to grow via learning. The rest are frozen at zero through gradient masking.
-    This could be taken out or modified. 
-- Topk (listening to only some neighbors) and gradient freezing (structural barriers in connectivity) may
-be redundant sparsity constraints; one of them could be omitted.
 - Agents only weakly specialize through agent-specific embeddings.
     Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
-    additional diversity or specialization losses
+    additional diversity or specialization losses.
 - No residual connections.
     Alternative: `h = h + torch.stack(head_outputs).mean(dim=0)` or `h = self.norm(h + ...)`
 - Collective aggregation occurs through mean pooling across agents.
@@ -138,24 +140,23 @@ class DotGATLayer(nn.Module):
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
         self.topk = topk
-
+    
     def forward(self, x, connectivity):
         # x: [batch_size, num_agents, hidden_dim]
         B, A, H = x.shape
+
         x = x.view(B * A, H)  # Flatten batch and agents
         # Compute query, key, and value matrices
         Q = self.q_proj(x).view(B, A, -1)
         K = self.k_proj(x).view(B, A, -1)
         V = self.v_proj(x).view(B, A, -1)
+
         # Compute scaled dot-product attention scores
         scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
-        scores = scores + connectivity  # [B, A, A]
-        # Apply attention with top-k sparsification
-        topk_vals, topk_idx = torch.topk(scores, self.topk, dim=-1)
-        mask = scores.new_full(scores.shape, float('-inf'))
-        mask.scatter_(dim=-1, index=topk_idx, src=topk_vals)
+        scores = scores + connectivity  # Add learnable connectivity bias
 
-        alpha = F.softmax(mask, dim=-1)
+        # Full attention (no top-k)
+        alpha = F.softmax(scores, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
         out = torch.matmul(alpha, V)  # [B, A, hidden_dim]
@@ -170,6 +171,7 @@ class DistributedDotGAT(nn.Module):
         self.hidden_dim = hidden_dim
         self.message_steps = message_steps
         self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.dropout = dropout
         #v1:self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
         #v2:self.agent_input_projs = nn.ModuleList([
         #    nn.Linear(input_dim, hidden_dim, bias=False) for _ in range(num_agents)
@@ -270,7 +272,7 @@ class DistributedDotGAT(nn.Module):
         for _ in range(self.message_steps):
             head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
             h = torch.stack(head_outputs).mean(dim=0)
-            h = self.swish(F.dropout(h, p=0.3, training=self.training))
+            #h = self.swish(F.dropout(h, p=self.dropout, training=self.training))
 
         out = self.output_proj(h)
         return out  # [batch, num_agents, output_dim]
@@ -366,8 +368,8 @@ def spectral_penalty(output, rank, evalmode=False):
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
     gap = (s_last - s_next) if len(S) > 1 else 0.0
-    ratio = sum_rest / (s_last + 1e-6)
-    penalty = sum_rest + ratio #- 2*gap
+    #ratio = sum_rest / (s_last + 1e-6)
+    penalty = sum_rest - 10*gap #+ ratio #
     if s_last > 2 * min(output.shape):
         penalty += (s_last - 2 * min(output.shape)) ** 2
     elif s_last < min(output.shape) / 2:
@@ -412,7 +414,10 @@ def train(model, loader, optimizer, theta, criterion, rank,
             spectral_penalty(out[i], rank) for i in range(batch_size)
         ) / batch_size
         diversity = agent_diversity_penalty(out)  # out: [B, A, D]
-        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.4 * diversity
+        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.5 * diversity
+        #target_var = 1.0
+        #var_penalty = F.mse_loss(out.var(), torch.tensor(target_var).to(out.device))
+        #loss += 0.2 * var_penalty
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -496,7 +501,8 @@ def evaluate_agent_contributions(model, loader, criterion, n, m,
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
-        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        nn.init.xavier_uniform_(m.weight, gain=30.0)
+        #nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)
             

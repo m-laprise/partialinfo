@@ -2,6 +2,8 @@
 Dot product graph attention network for dsitributed matrix completion, 
 with learned agent-based message passing setup.
 Supports both sparse views and low-dimensional projections as agent inputs.
+
+Currently, view-mode 'sparse' runs, but view-mode 'project' needs to be debugged.
 """
 
 import argparse
@@ -110,8 +112,8 @@ class MultiHeadDotGAT(nn.Module):
         x_out = torch.cat(head_outputs, dim=1) if self.agg_mode == 'concat' else torch.stack(head_outputs).mean(dim=0)
         x_out = self.norm(x_out)
         x_out = F.dropout(x_out, p=self.dropout, training=self.training)
-        x_out = self.swish(x_out)
         x_out = x_out + self.residual(x)
+        x_out = self.swish(x_out)
         return self.output(x_out)
 
 
@@ -301,7 +303,13 @@ def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.de
 
     print(f"Mean agent MSE: {agent_mean:.4f}, Std: {agent_std:.4f}")
     print(f"Min agent MSE: {agent_min:.4f}, Max: {agent_max:.4f}")
-    
+
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+            
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--n', type=int, default=20)
@@ -344,6 +352,7 @@ if __name__ == '__main__':
         dropout=args.dropout,
         agg_mode='concat'
     ).to(device)
+    model.apply(init_weights)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss()

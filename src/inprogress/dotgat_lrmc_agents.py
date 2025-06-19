@@ -367,14 +367,14 @@ def spectral_penalty(output, rank, evalmode=False):
     sum_rest = S[rank:].sum()
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
-    gap = (s_last - s_next) if len(S) > 1 else 0.0
+    gap = (s_last - s_next)
     svdcount = len(S) # or min(output.shape)
-    #ratio = sum_rest / (s_last + 1e-6)
-    penalty = sum_rest/svdcount - gap #+ ratio #
+    ratio = sum_rest / (s_last + 1e-6)
+    penalty = sum_rest/(svdcount-rank) + ratio #
     if s_last > 2 * svdcount:
-        penalty += (s_last - 2 * svdcount) ** 2
+        penalty += (s_last - svdcount)/svdcount ** 2
     elif s_last < svdcount / 2:
-        penalty += (svdcount / 2 - s_last) ** 2
+        penalty += (svdcount - s_last)/svdcount ** 2
     if evalmode:
         return gap
     else:
@@ -503,7 +503,7 @@ def evaluate_agent_contributions(model, loader, criterion, n, m,
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight, gain=10.0)
+        nn.init.xavier_uniform_(m.weight, gain=5.0)
         #nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)

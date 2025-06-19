@@ -25,14 +25,15 @@ class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
 
+
 def unique_filename(base_dir="results", prefix="run"):
     os.makedirs(base_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(base_dir, f"{prefix}_{timestamp}")
 
+
 def plot_stats(stats, filename_base, true_nuclear_mean):
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
-
     # Plot loss-related metrics in two panels
     fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
     axs[0].plot(epochs, stats["train_loss"], label="Train Loss", color='tab:blue')
@@ -41,7 +42,6 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     axs[0].set_ylabel("Loss")
     axs[0].grid(True)
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-
     axs[1].plot(epochs, stats["val_known_mse"], label="Val MSE Known Entries", color='tab:green')
     axs[1].plot(epochs, stats["val_unknown_mse"], label="Val MSE Unknown Entries", color='tab:orange')
     axs[1].plot(epochs, stats["variance"], label="Variance of Reconstructed Entries", color='tab:red')
@@ -51,15 +51,13 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     axs[1].grid(True)
     axs[1].legend()
     axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-
     fig.tight_layout()
     fig.savefig(f"{filename_base}_loss_metrics.png")
     plt.close(fig)
-
     # Plot spectral diagnostics
     fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
     ax.plot(epochs, stats["nuclear_norm"], label="Nuclear Norm", color='tab:purple')
-    ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap (s1 - s2)", color='tab:orange')
+    ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap", color='tab:orange')
     ax.axhline(y=true_nuclear_mean, color='gray', linestyle='--', label="Ground Truth Mean Nuclear Norm")
     ax.set_title("Spectral Properties Over Epochs")
     ax.set_xlabel("Epoch")
@@ -67,16 +65,17 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     ax.grid(True)
     ax.legend()
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-
     fig.tight_layout()
     fig.savefig(f"{filename_base}_spectral_diagnostics.png")
     plt.close(fig)
+
 
 class DotGATLayer(nn.Module):
     def __init__(self, in_features, out_features, dropout=0.6):
         super().__init__()
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
+        self.v_proj = nn.Linear(in_features, out_features, bias=False)
         self.residual = nn.Linear(in_features, out_features) if in_features != out_features else nn.Identity()
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
@@ -84,10 +83,11 @@ class DotGATLayer(nn.Module):
     def forward(self, x):
         Q = self.q_proj(x)
         K = self.k_proj(x)
+        V = self.v_proj(x)
         scores = torch.matmul(Q, K.T) / self.scale
         alpha = F.softmax(scores, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        out = torch.matmul(alpha, Q)
+        out = torch.matmul(alpha, V)
         return out + self.residual(x)
 
 
@@ -132,7 +132,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.nuclear_norm_mean = 0.0
         super().__init__('.')
         self.data, self.slices = self._generate()
-
+    
     def _generate(self):
         data_list = []
         norms = []
@@ -145,7 +145,6 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             M_tensor = torch.tensor(M, dtype=torch.float).view(-1)
             mask_tensor = torch.tensor(mask, dtype=torch.bool).view(-1)
             norms.append(torch.linalg.norm(torch.tensor(M, dtype=torch.float), ord='nuc').item())
-            
             if self.view_mode == 'sparse':
                 observed_tensor = torch.tensor(observed, dtype=torch.float).view(-1)
                 features = []
@@ -161,18 +160,18 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                     torch.matmul(torch.randn(self.input_dim, self.n * self.m), observed_tensor)
                     for _ in range(self.num_agents)
                 ])
-
             data = Data(x=x, y=M_tensor, mask=mask_tensor)
             data_list.append(data)
         self.nuclear_norm_mean = np.mean(norms)
         return self.collate(data_list)
 
-def spectral_penalty(output):
+
+def spectral_penalty(output, rank):
     """
     Compute spectral penalty for a low rank matrix output.
     
     The spectral penalty is defined as the sum of the singular values
-    of the output matrix, excluding the largest singular value.
+    of the output matrix, excluding the r largest singular values.
     
     Additionally, if the largest singular value is greater than 2
     times the smaller dimension of the output matrix, or if it is
@@ -180,24 +179,43 @@ def spectral_penalty(output):
     (s0 - 2 * N) ** 2 or (N / 2 - s0) ** 2, respectively.
     
     Return the spectral penalty, the largest singular value, and the
-    gap between the largest and second largest singular values.
+    gap between the rth and the next largest singular values.
     """
     try:
         U, S, Vt = torch.linalg.svd(output, full_matrices=False)
     except RuntimeError:
         S = torch.linalg.svdvals(output)
-    sum_rest = S[1:].sum()
-    N = min(output.shape)
-    penalty = sum_rest
-    s0 = S[0].item()
-    if s0 > 2 * N:
-        penalty += (s0 - 2 * N) ** 2
-    elif s0 < N / 2:
-        penalty += (N / 2 - s0) ** 2
-    gap = (s0 - S[1].item()) if len(S) > 1 else 0.0
-    return penalty, s0, gap
+    sum_rest = S[rank:].sum()
+    s_last = S[rank - 1].item()
+    s_next = S[rank].item()
+    #N = min(output.shape)
+    #if s0 > 2 * N:
+    #    penalty += (s0 - 2 * N) ** 2
+    #elif s0 < N / 2:
+    #    penalty += (N / 2 - s0) ** 2
+    gap = (s_last - s_next) if len(S) > 1 else 0.0
+    ratio = sum_rest / (s_last + 1e-6)
+    penalty = sum_rest - gap #+ ratio
+    return penalty, s_last, gap
 
-def train(model, loader, optimizer, theta, criterion, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def agent_diversity_penalty(agent_outputs):
+    # agent_outputs: [num_agents, n*m] or [batch_size, num_agents, n*m]
+    if agent_outputs.dim() == 3:
+        B, A, D = agent_outputs.shape
+        agent_outputs = F.normalize(agent_outputs, dim=-1)  # cosine space
+        sim = torch.matmul(agent_outputs, agent_outputs.transpose(1, 2))  # [B, A, A]
+        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
+        pairwise_sim = sim[:, mask].view(B, -1)  # remove diagonal
+        return pairwise_sim.mean()
+    else:
+        A, D = agent_outputs.shape
+        agent_outputs = F.normalize(agent_outputs, dim=-1)
+        sim = torch.matmul(agent_outputs, agent_outputs.T)  # [A, A]
+        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
+        pairwise_sim = sim[mask].view(A, -1)
+        return pairwise_sim.mean()
+
+def train(model, loader, optimizer, theta, criterion, rank, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.train()
     total_loss = 0
     for batch in loader:
@@ -211,55 +229,49 @@ def train(model, loader, optimizer, theta, criterion, device=torch.device('cuda'
         reconstructionloss = criterion(prediction, target)
         penalty = 0.0
         for i in range(out.shape[0]):  # batch size
-            p, _, _ = spectral_penalty(out[i])  # [num_agents, n*m] per sample
+            p, _, _ = spectral_penalty(out[i], rank)  # [num_agents, n*m] per sample
             penalty += p
         penalty /= out.shape[0]
-        loss = theta * reconstructionloss + (1 - theta) * penalty
+        diversity = agent_diversity_penalty(out)  # out: [B, A, D]
+        loss = theta * reconstructionloss + (1 - theta) * penalty + 0.01 * diversity
         loss.backward()
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(loader)
 
+
 @torch.no_grad()
-def evaluate(model, loader, criterion, n, m, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+def evaluate(model, loader, criterion, n, m, rank, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     known_mse, unknown_mse, nuclear_norms, variances, gaps = [], [], [], [], []
-
     for batch in loader:
         batch = batch.to(device)
         batch_size = batch.num_graphs
-
         # Forward pass
         out = model(batch.x)  # [batch_size * num_agents, n*m]
         out = out.view(batch_size, -1, out.shape[-1])  # [batch_size, num_agents, n*m]
         prediction = out.mean(dim=1)  # [batch_size, n*m]
         target = batch.y.view(batch_size, -1)  # [batch_size, n*m]
         mask = batch.mask.view(batch_size, -1)  # [batch_size, n*m]
-
         for i in range(batch_size):
             pred_i = prediction[i]  # [n*m]
             target_i = target[i]    # [n*m]
             mask_i = mask[i]        # [n*m]
-
             known_i = mask_i
             unknown_i = ~mask_i
-
             if known_i.any():
                 known_mse.append(criterion(pred_i[known_i], target_i[known_i]).item())
             if unknown_i.any():
                 unknown_mse.append(criterion(pred_i[unknown_i], target_i[unknown_i]).item())
-
             # Reshape for nuclear norm
             matrix_2d = pred_i.view(n, m)
             nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
-
             # Spectral penalty metrics
-            _, _, gap = spectral_penalty(out[i])  # [num_agents, n*m]
+            _, _, gap = spectral_penalty(out[i], rank)  # [num_agents, n*m]
             gaps.append(gap)
-
             # Variance of the agent outputs
             variances.append(out[i].var().item())
-
     return (
         np.mean(known_mse) if known_mse else float('nan'),
         np.mean(unknown_mse) if unknown_mse else float('nan'),
@@ -268,22 +280,20 @@ def evaluate(model, loader, criterion, n, m, device=torch.device('cuda' if torch
         np.mean(gaps),
     )
 
+
 @torch.no_grad()
 def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     print("\nEvaluating individual agent contributions...")
     all_agent_errors = []
-
     for batch in loader:
         batch = batch.to(device)
         batch_size = batch.num_graphs
         num_agents = batch.x.shape[0] // batch_size
         nm = n * m
-
         out = model(batch.x)  # [batch_size * num_agents, n*m]
         out = out.view(batch_size, num_agents, nm)  # [B, A, n*m]
         targets = batch.y.view(batch_size, nm)      # [B, n*m]
-
         for i in range(batch_size):
             individual_errors = []
             for a in range(num_agents):
@@ -292,7 +302,6 @@ def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.de
                 error = criterion(agent_pred, target).item()
                 individual_errors.append((a, error))
             all_agent_errors.append(individual_errors)
-
     # Aggregate and report
     flat_errors = [err for sample in all_agent_errors for _, err in sample]
     agent_errors = torch.tensor(flat_errors)
@@ -300,9 +309,9 @@ def evaluate_agent_contributions(model, loader, criterion, n, m, device=torch.de
     agent_std = agent_errors.std().item()
     agent_min = agent_errors.min().item()
     agent_max = agent_errors.max().item()
-
     print(f"Mean agent MSE: {agent_mean:.4f}, Std: {agent_std:.4f}")
     print(f"Min agent MSE: {agent_min:.4f}, Max: {agent_max:.4f}")
+
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
@@ -310,6 +319,7 @@ def init_weights(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
             
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--n', type=int, default=20)
@@ -373,9 +383,9 @@ if __name__ == '__main__':
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
-            model, train_loader, optimizer, args.theta, criterion)
+            model, train_loader, optimizer, args.theta, criterion, args.r)
         val_known, val_unknown, nuc, var, gap = evaluate(
-            model, val_loader, criterion, args.n, args.m)
+            model, val_loader, criterion, args.n, args.m, args.r)
         
         stats["train_loss"].append(train_loss)
         stats["val_known_mse"].append(val_known)
@@ -409,7 +419,7 @@ if __name__ == '__main__':
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(
-        model, test_loader, criterion, args.n, args.m)
+        model, test_loader, criterion, args.n, args.m, args.r)
     print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}, Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")
 
     # Agent contribution eval (optional)

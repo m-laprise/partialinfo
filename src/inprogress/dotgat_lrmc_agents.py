@@ -134,7 +134,14 @@ class DotGATLayer(nn.Module):
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
-        self.forward_proj = nn.Linear(out_features, out_features)
+        #self.forward_proj = nn.Linear(out_features, out_features)
+        self.forward_proj = nn.Sequential(
+            Swish(),
+            nn.Linear(out_features, 2*out_features),
+            Swish(),
+            nn.Linear(2*out_features, out_features),
+        )
+        self.Swish = Swish()
         self.norm = nn.LayerNorm(out_features)
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
@@ -222,9 +229,14 @@ class DistributedDotGAT(nn.Module):
             DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
             for _ in range(num_heads)
         ])
-        final_dim = hidden_dim
+
         self.swish = Swish()
-        self.output_proj = nn.Linear(final_dim, output_dim)
+        #self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.output_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, output_dim),
+        )
 
     def forward(self, x):
         # x: [batch, num_agents, input_dim]

@@ -1,5 +1,5 @@
 """
-Dot product graph attention network for distributed matrix completion, 
+Dot product graph attention network for distributed inductive matrix completion, 
 with learned agent-based message passing setup.
 Supports both sparse views and low-dimensional projections as agent inputs.
 
@@ -20,8 +20,8 @@ Explicit message passing rounds are controlled by message_steps in DistributedDo
 updates applied iteratively through GAT heads.
 
 Design choices:
-- *Positional embeddings*: Agent specific positional embeddings of the sparse entries they see
-are required, but not well implemented.
+- *Positional embeddings*: Learned Fourier-features positional embeddings of the sparse entries. Many
+alternatives are possible, including integrating structural rather than only coordinate information.
 - *Adjacency matrix is not input-dependent*: 
 Currently self.connectivity is shared across all heads and batches, and static per model instance.
     An alternative would be to allow connectivity vary by batch or to depend on inputs/agent embeddings.
@@ -128,6 +128,30 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     plt.close(fig)
 
 
+class FourierPositionalEncoder(nn.Module):
+    def __init__(self, num_frequencies=16):
+        super().__init__()
+        self.B = nn.Parameter(torch.randn(num_frequencies, 2))
+
+    def forward(self, coords):
+        proj = 2 * math.pi * coords @ self.B.T  # (N, F)
+        return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)  # (N, 2F)
+
+
+class EntryEncoder(nn.Module):
+    def __init__(self, fourier_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(1 + 2 * fourier_dim, hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, values, pos_features):
+        x = torch.cat([values, pos_features], dim=-1)
+        return self.mlp(x)
+
+
 class DotGATLayer(nn.Module):
     def __init__(self, in_features, out_features, dropout):
         super().__init__()
@@ -137,9 +161,9 @@ class DotGATLayer(nn.Module):
         #self.forward_proj = nn.Linear(out_features, out_features)
         self.forward_proj = nn.Sequential(
             Swish(),
-            nn.Linear(out_features, 2*out_features),
+            nn.Linear(out_features, out_features),
             Swish(),
-            nn.Linear(2*out_features, out_features),
+            nn.Linear(out_features, out_features),
         )
         self.Swish = Swish()
         self.norm = nn.LayerNorm(out_features)
@@ -176,24 +200,17 @@ class DistributedDotGAT(nn.Module):
         self.num_agents = num_agents
         self.hidden_dim = hidden_dim
         self.message_steps = message_steps
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        #self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.dropout = dropout
         #v1:self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
         #v2:self.agent_input_projs = nn.ModuleList([
         #    nn.Linear(input_dim, hidden_dim, bias=False) for _ in range(num_agents)
         #])
-        pos_emb_dim = 32
-        self.position_embedding = nn.Embedding(input_dim, pos_emb_dim)
-        self.value_projection = nn.Linear(1, pos_emb_dim)
-        self.token_proj = nn.Sequential(
-            nn.Linear(pos_emb_dim, hidden_dim),
-            Swish()
-        )
-        self.aggregator = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            Swish()
-        )
-            
+        pos_emb_dim = 16
+        self.pos_encoder = FourierPositionalEncoder(num_frequencies=pos_emb_dim)
+        self.entry_encoder = EntryEncoder(
+            fourier_dim=pos_emb_dim, hidden_dim=hidden_dim, output_dim=hidden_dim)
+
         # Generate small-world graph
         G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
         A = torch.zeros(num_agents, num_agents)
@@ -212,7 +229,6 @@ class DistributedDotGAT(nn.Module):
         perm = torch.randperm(num_candidates.shape[0])
         num_learnable = perm.shape[0] // 2
         learnable_idx = num_candidates[perm[:num_learnable]]
-
         final_mask = torch.ones_like(mask_flat)
         final_mask[mask_flat == 1] = 0.0  # freeze all zero-edges
         final_mask[learnable_idx] = 1.0   # unfreeze selected
@@ -231,12 +247,12 @@ class DistributedDotGAT(nn.Module):
         ])
 
         self.swish = Swish()
-        #self.output_proj = nn.Linear(hidden_dim, output_dim)
-        self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            Swish(),
-            nn.Linear(hidden_dim, output_dim),
-        )
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+        #self.output_proj = nn.Sequential(
+        #    nn.Linear(hidden_dim, hidden_dim),
+        #    Swish(),
+        #    nn.Linear(hidden_dim, output_dim),
+        #)
 
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
@@ -247,31 +263,30 @@ class DistributedDotGAT(nn.Module):
         #], dim=1)  # -> [batch, num_agents, hidden_dim]
         B, A, D = x.shape  # [batch, num_agents, n*m]
         device = x.device
-
         states = []
         # For each agent’s input vector x \in \mathbb{R}^{n \times m}:
-        #1.	Extract non-zero values and indices.
-        #2.	Use a positional encoder: e.g., learnable embedding or sinusoidal positional encodings.
-        #3.	Combine position and value into token embeddings: e_i = f(value_i, position_i)
-        #4.	Aggregate these into a fixed-size state vector per agent
         for agent_id in range(self.num_agents):
+            # 1. Extract non-zero values and indices
             agent_inputs = x[:, agent_id, :]  # [B, n*m]
-
             nonzero_mask = agent_inputs != 0  # [B, n*m]
-            values = agent_inputs[nonzero_mask].unsqueeze(-1)  # [total_tokens, 1]
-            positions = torch.arange(D, device=device).repeat(B, 1)[nonzero_mask]  # [total_tokens]
-
-            # Project position and value
-            val_enc = self.value_projection(values)  # [tokens, dim]
-            pos_enc = self.position_embedding(positions)  # [tokens, dim]
-            token_embeds = self.token_proj(val_enc + pos_enc)  # [tokens, hidden_dim]
-
-            # Aggregate: mean pooling per batch sample
-            # Recover sample indices from flattened mask
+            coords = nonzero_mask.nonzero(as_tuple=False)
+            batch_ids = coords[:, 0]
+            flat_indices = coords[:, 1]
+            values = agent_inputs[batch_ids, flat_indices].unsqueeze(-1)
+            row = flat_indices // int(math.sqrt(D))
+            col = flat_indices % int(math.sqrt(D))
+            ij_coords = torch.stack([row, col], dim=1).float().to(device)
+            
+            # 2. Apply positional encoding and value embedding
+            # & 3. Combine position and value into token embeddings: e_i = f(value_i, position_i)
+            pos_feats = self.pos_encoder(ij_coords)
+            entry_embeds = self.entry_encoder(values, pos_feats)
+            
+            # 4. Aggregate into a fixed-size state vector per agent
             counts = nonzero_mask.sum(dim=1)  # shape: [B], type: torch.Tensor
             batch_idx = torch.arange(B, device=device).repeat_interleave(counts)
             agent_embed = torch.zeros(B, self.hidden_dim, device=device).index_add_(
-                0, batch_idx, token_embeds
+                0, batch_idx, entry_embeds
             )
             norm_factors = nonzero_mask.sum(dim=1).clamp(min=1).unsqueeze(1)
             agent_embed /= norm_factors  # [B, hidden_dim]

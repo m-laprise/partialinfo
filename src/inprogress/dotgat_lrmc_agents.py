@@ -193,6 +193,39 @@ class DotGATLayer(nn.Module):
         return self.norm(out)
 
 
+class MatrixDecoder(nn.Module):
+    def __init__(self, hidden_dim, num_frequencies=16):
+        super().__init__()
+        self.fourier_dim = num_frequencies
+        self.pos_encoder = FourierPositionalEncoder(num_frequencies)
+
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim + 2 * num_frequencies, hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, hidden_dim),
+            Swish(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, coords: torch.Tensor, agent_embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            coords: [B, T, 2] - target positions (i,j)
+            agent_embedding: [B, D] - agent-level embedding
+
+        Returns:
+            predictions: [B, T] - predicted values at positions
+        """
+        B, T, _ = coords.shape
+        pos_feats = self.pos_encoder(coords.view(-1, 2)).view(B, T, -1)  # [B, T, 2F]
+
+        agent_rep = agent_embedding.unsqueeze(1).expand(-1, T, -1)  # [B, T, D]
+        joint = torch.cat([agent_rep, pos_feats], dim=-1)  # [B, T, D + 2F]
+
+        out = self.decoder(joint)  # [B, T, 1]
+        return out.squeeze(-1)  # [B, T]
+    
+
 class DistributedDotGAT(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_agents, 
                  num_heads, dropout, message_steps=3):
@@ -431,23 +464,6 @@ def spectral_penalty(output, rank, evalmode=False):
         return gap
     else:
         return penalty
-
-#def agent_diversity_penalty(agent_outputs):
-#    # agent_outputs: [num_agents, n*m] or [batch_size, num_agents, n*m]
-#    if agent_outputs.dim() == 3:
-#        B, A, D = agent_outputs.shape
-#        agent_outputs = F.normalize(agent_outputs, dim=-1)  # cosine space
-#        sim = torch.matmul(agent_outputs, agent_outputs.transpose(1, 2))  # [B, A, A]
-#        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
-#        pairwise_sim = sim[:, mask].view(B, -1)  # remove diagonal
-#        return pairwise_sim.mean()
-#    else:
-#        A, D = agent_outputs.shape
-#        agent_outputs = F.normalize(agent_outputs, dim=-1)
-#        sim = torch.matmul(agent_outputs, agent_outputs.T)  # [A, A]
-#        mask = ~torch.eye(A, dtype=torch.bool, device=sim.device)
-#        pairwise_sim = sim[mask].view(A, -1)
-#        return pairwise_sim.mean()
 
 def train(model, loader, optimizer, theta, criterion, rank, 
           device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):

@@ -40,10 +40,9 @@ The rest are frozen at zero through gradient masking.
     additional diversity or specialization losses.
 - No residual connections.
     Alternative: `h = h + torch.stack(head_outputs).mean(dim=0)` or `h = self.norm(h + ...)`
-- Collective aggregation occurs through mean pooling across agents.
+- Collective aggregation occurs through learned, gated (input-dependent) pooling across agents.
     Alternatives include:
     attention-based aggregation with a learned attention weight for each agent, 
-    aggregate using learned gating, 
     game-theoretic aggregation of subsets of agents based on utility or diversity contribution
 
 Required improvements:
@@ -280,19 +279,37 @@ class DistributedDotGAT(nn.Module):
 
 
 class Aggregator(nn.Module):
-    def __init__(self, num_agents):
+    """
+    Input-dependent aggregation module. It reads each agent's output,
+    uses a shared MLP to compute per-agent gates based on their output,
+    applies a softmax over agent gates, and then performs weighted sum.
+    
+    We hope this is flexible enough to let the model learn how to downweight
+    non-informative agent outputs (e.g. near-zero).
+    """
+    def __init__(self, num_agents, output_dim, hidden_dim=64):
         super().__init__()
-        # Learnable logits -> softmax gives weights
-        self.agent_logits = nn.Parameter(torch.zeros(num_agents))
+        self.num_agents = num_agents
+        self.output_dim = output_dim
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(output_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
 
     def forward(self, agent_outputs):
         """
-        agent_outputs: [B, num_agents, n*m]
-        returns: [B, n*m] weighted aggregation
+        agent_outputs: [B, A, D] where D = n*m
+        returns: [B, D] aggregated output
         """
-        weights = F.softmax(self.agent_logits, dim=0)  # [num_agents]
-        weighted = agent_outputs * weights.view(1, -1, 1)  # broadcast: [B, A, n*m]
-        return weighted.sum(dim=1)  # [B, n*m]
+        B, A, D = agent_outputs.shape
+
+        # Compute per-agent gates based on their output
+        gates = self.gate_mlp(agent_outputs)  # [B, A, 1]
+        weights = F.softmax(gates, dim=1)     # [B, A, 1]
+
+        weighted_output = agent_outputs * weights  # [B, A, D]
+        return weighted_output.sum(dim=1)          # [B, D]
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
@@ -564,7 +581,9 @@ if __name__ == '__main__':
     model.apply(init_weights)
     count_parameters(model)
     
-    aggregator = Aggregator(num_agents=args.num_agents).to(device)
+    aggregator = Aggregator(
+        num_agents=args.num_agents, output_dim=args.n * args.m
+    ).to(device)
     aggregator.apply(init_weights)
     count_parameters(aggregator)
     

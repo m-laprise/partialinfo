@@ -210,7 +210,14 @@ class DistributedDotGAT(nn.Module):
         self.pos_encoder = FourierPositionalEncoder(num_frequencies=pos_emb_dim)
         self.entry_encoder = EntryEncoder(
             fourier_dim=pos_emb_dim, hidden_dim=hidden_dim, output_dim=hidden_dim)
-
+        
+        self.max_entries = round((output_dim * 0.5) / (num_agents / 2))
+        self.pad_token = nn.Parameter(torch.zeros(hidden_dim))  # learnable pad
+        self.entry_embed_compression = nn.Sequential(
+            nn.Linear(self.max_entries * hidden_dim, 2 * hidden_dim),
+            Swish(),
+            nn.Linear(2 * hidden_dim, hidden_dim)
+        )
         # Generate small-world graph
         G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
         A = torch.zeros(num_agents, num_agents)
@@ -273,6 +280,7 @@ class DistributedDotGAT(nn.Module):
             batch_ids = coords[:, 0]
             flat_indices = coords[:, 1]
             values = agent_inputs[batch_ids, flat_indices].unsqueeze(-1)
+            
             row = flat_indices // int(math.sqrt(D))
             col = flat_indices % int(math.sqrt(D))
             ij_coords = torch.stack([row, col], dim=1).float().to(device)
@@ -283,13 +291,31 @@ class DistributedDotGAT(nn.Module):
             entry_embeds = self.entry_encoder(values, pos_feats)
             
             # 4. Aggregate into a fixed-size state vector per agent
-            counts = nonzero_mask.sum(dim=1)  # shape: [B], type: torch.Tensor
-            batch_idx = torch.arange(B, device=device).repeat_interleave(counts)
-            agent_embed = torch.zeros(B, self.hidden_dim, device=device).index_add_(
-                0, batch_idx, entry_embeds
-            )
-            norm_factors = nonzero_mask.sum(dim=1).clamp(min=1).unsqueeze(1)
-            agent_embed /= norm_factors  # [B, hidden_dim]
+            # Group per batch
+            grouped = [[] for _ in range(B)]
+            for idx, b in enumerate(batch_ids):
+                grouped[b.item()].append(entry_embeds[idx])
+                
+            # Truncate or pad each to max_entries
+            agent_embed = []
+            for entry_list in grouped:
+                if len(entry_list) > self.max_entries:
+                    entry_list = entry_list[:self.max_entries]
+                while len(entry_list) < self.max_entries:
+                    entry_list.append(self.pad_token)
+                agent_embed.append(torch.stack(entry_list))  # shape: [max_entries, hidden_dim]
+            
+            agent_embed = torch.stack(agent_embed)  # [B, max_entries, hidden_dim]
+            # Flatten or pool
+            agent_embed = agent_embed.view(B, -1)  # [B, max_entries * hidden_dim]
+            agent_embed = self.entry_embed_compression(agent_embed)  # [B, hidden_dim]
+            #counts = nonzero_mask.sum(dim=1)  # shape: [B], type: torch.Tensor
+            #batch_idx = torch.arange(B, device=device).repeat_interleave(counts)
+            #agent_embed = torch.zeros(B, self.hidden_dim, device=device).index_add_(
+            #    0, batch_idx, entry_embeds
+            #)
+            #norm_factors = nonzero_mask.sum(dim=1).clamp(min=1).unsqueeze(1)
+            #agent_embed /= norm_factors  # [B, hidden_dim]
 
             states.append(agent_embed)
 

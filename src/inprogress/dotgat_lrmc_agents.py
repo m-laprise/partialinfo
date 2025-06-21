@@ -128,30 +128,6 @@ def plot_stats(stats, filename_base, true_nuclear_mean):
     plt.close(fig)
 
 
-class FourierPositionalEncoder(nn.Module):
-    def __init__(self, num_frequencies=16):
-        super().__init__()
-        self.B = nn.Parameter(torch.randn(num_frequencies, 2))
-
-    def forward(self, coords):
-        proj = 2 * math.pi * coords @ self.B.T  # (N, F)
-        return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)  # (N, 2F)
-
-
-class EntryEncoder(nn.Module):
-    def __init__(self, fourier_dim, hidden_dim, output_dim):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(1 + 2 * fourier_dim, hidden_dim),
-            Swish(),
-            nn.Linear(hidden_dim, output_dim)
-        )
-
-    def forward(self, values, pos_features):
-        x = torch.cat([values, pos_features], dim=-1)
-        return self.mlp(x)
-
-
 class DotGATLayer(nn.Module):
     def __init__(self, in_features, out_features, dropout):
         super().__init__()
@@ -193,64 +169,31 @@ class DotGATLayer(nn.Module):
         return self.norm(out)
 
 
-class MatrixDecoder(nn.Module):
-    def __init__(self, hidden_dim, num_frequencies=16):
-        super().__init__()
-        self.fourier_dim = num_frequencies
-        self.pos_encoder = FourierPositionalEncoder(num_frequencies)
-
-        self.decoder = nn.Sequential(
-            nn.Linear(hidden_dim + 2 * num_frequencies, hidden_dim),
-            Swish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            Swish(),
-            nn.Linear(hidden_dim, 1)
-        )
-
-    def forward(self, coords: torch.Tensor, agent_embedding: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            coords: [B, T, 2] - target positions (i,j)
-            agent_embedding: [B, D] - agent-level embedding
-
-        Returns:
-            predictions: [B, T] - predicted values at positions
-        """
-        B, T, _ = coords.shape
-        pos_feats = self.pos_encoder(coords.view(-1, 2)).view(B, T, -1)  # [B, T, 2F]
-
-        agent_rep = agent_embedding.unsqueeze(1).expand(-1, T, -1)  # [B, T, D]
-        joint = torch.cat([agent_rep, pos_feats], dim=-1)  # [B, T, D + 2F]
-
-        out = self.decoder(joint)  # [B, T, 1]
-        return out.squeeze(-1)  # [B, T]
-    
-
 class DistributedDotGAT(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_agents, 
-                 num_heads, dropout, message_steps=3):
+    def __init__(self, 
+                 input_dim, # also n x m if vectorized
+                 hidden_dim, # internal dim, e.g. 128
+                 n, m,
+                 num_agents, num_heads, dropout, message_steps=3):
         super().__init__()
+        self.output_dim = n * m
+        self.n = n
+        self.m = m
         self.num_agents = num_agents
         self.hidden_dim = hidden_dim
         self.message_steps = message_steps
-        #self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.dropout = dropout
-        #v1:self.agent_embeddings = nn.Parameter(torch.randn(num_agents, hidden_dim))
         #v2:self.agent_input_projs = nn.ModuleList([
         #    nn.Linear(input_dim, hidden_dim, bias=False) for _ in range(num_agents)
         #])
-        pos_emb_dim = 16
-        self.pos_encoder = FourierPositionalEncoder(num_frequencies=pos_emb_dim)
-        self.entry_encoder = EntryEncoder(
-            fourier_dim=pos_emb_dim, hidden_dim=hidden_dim, output_dim=hidden_dim)
-        
-        self.max_entries = round((output_dim * 0.5) / (num_agents / 2))
-        self.pad_token = nn.Parameter(torch.zeros(hidden_dim))  # learnable pad
-        self.entry_embed_compression = nn.Sequential(
-            nn.Linear(self.max_entries * hidden_dim, 2 * hidden_dim),
+        self.agent_input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=False),
             Swish(),
-            nn.Linear(2 * hidden_dim, hidden_dim)
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
+            Swish(),
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
         )
+
         # Generate small-world graph
         G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
         A = torch.zeros(num_agents, num_agents)
@@ -287,80 +230,69 @@ class DistributedDotGAT(nn.Module):
         ])
 
         self.swish = Swish()
-        self.output_proj = nn.Linear(hidden_dim, output_dim)
-        #self.output_proj = nn.Sequential(
-        #    nn.Linear(hidden_dim, hidden_dim),
-        #    Swish(),
-        #    nn.Linear(hidden_dim, output_dim),
-        #)
+        #self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.maxrank = 2 #min(self.n // 2, self.m // 2)
+        self.U_proj = nn.Sequential(
+            #nn.Linear(hidden_dim, hidden_dim, bias=False),
+            #Swish(),
+            nn.Linear(hidden_dim, self.n * self.maxrank, bias=False),
+        )
+        self.V_proj = nn.Sequential(
+            #nn.Linear(hidden_dim, hidden_dim, bias=False),
+            #Swish(),
+            nn.Linear(hidden_dim, self.m * self.maxrank, bias=False),
+        )
 
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
-        #v1:h = self.input_proj(x) + self.agent_embeddings.unsqueeze(0)  # Inject identity
+        h = self.agent_input_proj(x)  # [B, A, hidden_dim]
         #v2:h = torch.stack([
         #    self.agent_input_projs[i](x[:, i, :])  # [batch, hidden_dim] for agent i
         #    for i in range(self.num_agents)
         #], dim=1)  # -> [batch, num_agents, hidden_dim]
-        B, A, D = x.shape  # [batch, num_agents, n*m]
-        device = x.device
-        states = []
-        # For each agent’s input vector x \in \mathbb{R}^{n \times m}:
-        for agent_id in range(self.num_agents):
-            # 1. Extract non-zero values and indices
-            agent_inputs = x[:, agent_id, :]  # [B, n*m]
-            nonzero_mask = agent_inputs != 0  # [B, n*m]
-            coords = nonzero_mask.nonzero(as_tuple=False)
-            batch_ids = coords[:, 0]
-            flat_indices = coords[:, 1]
-            values = agent_inputs[batch_ids, flat_indices].unsqueeze(-1)
-            
-            row = flat_indices // int(math.sqrt(D))
-            col = flat_indices % int(math.sqrt(D))
-            ij_coords = torch.stack([row, col], dim=1).float().to(device)
-            
-            # 2. Apply positional encoding and value embedding
-            # & 3. Combine position and value into token embeddings: e_i = f(value_i, position_i)
-            pos_feats = self.pos_encoder(ij_coords)
-            entry_embeds = self.entry_encoder(values, pos_feats)
-            
-            # 4. Aggregate into a fixed-size state vector per agent
-            # Group per batch
-            grouped = [[] for _ in range(B)]
-            for idx, b in enumerate(batch_ids):
-                grouped[b.item()].append(entry_embeds[idx])
-                
-            # Truncate or pad each to max_entries
-            agent_embed = []
-            for entry_list in grouped:
-                if len(entry_list) > self.max_entries:
-                    entry_list = entry_list[:self.max_entries]
-                while len(entry_list) < self.max_entries:
-                    entry_list.append(self.pad_token)
-                agent_embed.append(torch.stack(entry_list))  # shape: [max_entries, hidden_dim]
-            
-            agent_embed = torch.stack(agent_embed)  # [B, max_entries, hidden_dim]
-            # Flatten or pool
-            agent_embed = agent_embed.view(B, -1)  # [B, max_entries * hidden_dim]
-            agent_embed = self.entry_embed_compression(agent_embed)  # [B, hidden_dim]
-            #counts = nonzero_mask.sum(dim=1)  # shape: [B], type: torch.Tensor
-            #batch_idx = torch.arange(B, device=device).repeat_interleave(counts)
-            #agent_embed = torch.zeros(B, self.hidden_dim, device=device).index_add_(
-            #    0, batch_idx, entry_embeds
-            #)
-            #norm_factors = nonzero_mask.sum(dim=1).clamp(min=1).unsqueeze(1)
-            #agent_embed /= norm_factors  # [B, hidden_dim]
-
-            states.append(agent_embed)
-
-        h = torch.stack(states, dim=1)  # [B, A, hidden_dim]
 
         for _ in range(self.message_steps):
-            head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
-            h = torch.stack(head_outputs).mean(dim=0)
+            #head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
+            #h = torch.stack(head_outputs).mean(dim=0)
             #h = self.swish(F.dropout(h, p=self.dropout, training=self.training))
+            head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
+            # Max-pool across heads based on absolute values
+            stacked = torch.stack(head_outputs)  # [num_heads, B, A, hidden_dim]
+            abs_vals = torch.abs(stacked)
+            max_indices = torch.argmax(abs_vals, dim=0)  # [B, A, hidden_dim]
 
-        out = self.output_proj(h)
-        return out  # [batch, num_agents, output_dim]
+            # Convert to [B, A, hidden_dim, num_heads] for indexing
+            stacked = stacked.permute(1, 2, 3, 0).contiguous()  # [B, A, H, num_heads]
+            max_indices = max_indices.unsqueeze(-1)  # [B, A, H, 1]
+            h = torch.gather(stacked, dim=-1, index=max_indices).squeeze(-1)  # [B, A, H]
+        #out = self.output_proj(h)
+        B, A, H = h.shape
+        # Compute U and V from shared projections
+        U = self.U_proj(h).view(B, A, self.n, self.maxrank)   # [B, A, n, mr]
+        V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, mr]
+
+        # Compute H = U @ Vᵀ for each agent
+        H = torch.matmul(U, V.transpose(-1, -2))  # [B, A, n, m]
+        H = H.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
+
+        # Aggregate across agents: H.mean(dim=1)  # [B, n*m]
+        return H  # [batch, num_agents, output_dim]
+
+
+class Aggregator(nn.Module):
+    def __init__(self, num_agents):
+        super().__init__()
+        # Learnable logits -> softmax gives weights
+        self.agent_logits = nn.Parameter(torch.zeros(num_agents))
+
+    def forward(self, agent_outputs):
+        """
+        agent_outputs: [B, num_agents, n*m]
+        returns: [B, n*m] weighted aggregation
+        """
+        weights = F.softmax(self.agent_logits, dim=0)  # [num_agents]
+        weighted = agent_outputs * weights.view(1, -1, 1)  # broadcast: [B, A, n*m]
+        return weighted.sum(dim=1)  # [B, n*m]
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
@@ -465,7 +397,7 @@ def spectral_penalty(output, rank, evalmode=False):
     else:
         return penalty
 
-def train(model, loader, optimizer, theta, criterion, rank, 
+def train(model, aggregator, loader, optimizer, theta, criterion, rank, 
           device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.train()
     total_loss = 0
@@ -476,7 +408,7 @@ def train(model, loader, optimizer, theta, criterion, rank,
         x = batch.x 
         x = x.view(batch_size, model.num_agents, -1)
         out = model(x) 
-        prediction = out.mean(dim=1)
+        prediction = aggregator(out)
         target = batch.y.view(batch_size, -1)
         reconstructionloss = criterion(prediction, target)
         penalty = sum(
@@ -496,7 +428,7 @@ def train(model, loader, optimizer, theta, criterion, rank,
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, n, m, rank, 
+def evaluate(model, aggregator, loader, criterion, n, m, rank, 
              device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.eval()
     known_mse, unknown_mse, nuclear_norms, variances, gaps = [], [], [], [], []
@@ -506,7 +438,7 @@ def evaluate(model, loader, criterion, n, m, rank,
         # Forward pass
         x = batch.x.view(batch_size, model.num_agents, -1)
         out = model(x)
-        prediction = out.mean(dim=1)  # [batch_size, n*m]
+        prediction = aggregator(out)  # [batch_size, n*m]
         target = batch.y.view(batch_size, -1)  # [batch_size, n*m]
         mask = batch.mask.view(batch_size, -1)  # [batch_size, n*m]
         for i in range(batch_size):
@@ -571,8 +503,8 @@ def evaluate_agent_contributions(model, loader, criterion, n, m,
 
 def init_weights(m):
     if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight, gain=5.0)
-        #nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        #nn.init.xavier_uniform_(m.weight, gain=1.0)
+        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)
             
@@ -623,7 +555,7 @@ if __name__ == '__main__':
     model = DistributedDotGAT(
         input_dim=dataset.input_dim,
         hidden_dim=args.hidden_dim,
-        output_dim=dataset.n * dataset.m,
+        n=dataset.n, m=dataset.m,
         num_agents=args.num_agents,
         num_heads=args.num_heads,
         dropout=args.dropout,
@@ -632,7 +564,13 @@ if __name__ == '__main__':
     model.apply(init_weights)
     count_parameters(model)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    aggregator = Aggregator(num_agents=args.num_agents).to(device)
+    aggregator.apply(init_weights)
+    count_parameters(aggregator)
+    
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
+    )
     criterion = nn.MSELoss()
     
     stats = {
@@ -658,9 +596,9 @@ if __name__ == '__main__':
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
-            model, train_loader, optimizer, args.theta, criterion, args.r)
+            model, aggregator, train_loader, optimizer, args.theta, criterion, args.r)
         val_known, val_unknown, nuc, var, gap = evaluate(
-            model, val_loader, criterion, args.n, args.m, args.r)
+            model, aggregator, val_loader, criterion, args.n, args.m, args.r)
         
         stats["train_loss"].append(train_loss)
         stats["val_known_mse"].append(val_known)
@@ -705,7 +643,7 @@ if __name__ == '__main__':
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(
-        model, test_loader, criterion, args.n, args.m, args.r)
+        model, aggregator, test_loader, criterion, args.n, args.m, args.r)
     print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}"+
         f" Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")
 

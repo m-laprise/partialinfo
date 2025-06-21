@@ -62,14 +62,12 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from matplotlib.ticker import MaxNLocator
-from plot_utils import plot_connectivity_matrices
+from plot_utils import plot_connectivity_matrices, plot_stats
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader
 
@@ -85,48 +83,6 @@ def unique_filename(base_dir="results", prefix="run"):
     return os.path.join(base_dir, f"{prefix}_{timestamp}")
 
 
-def plot_stats(stats, filename_base, true_nuclear_mean):
-    epochs = np.arange(1, len(stats["train_loss"]) + 1)
-    # Plot loss-related metrics in two panels
-    fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
-    axs[0].plot(epochs, stats["train_loss"], label="Train Loss", color='tab:blue')
-    axs[0].set_title("Training Loss")
-    axs[0].set_xlabel("Epoch")
-    axs[0].set_ylabel("Loss")
-    axs[0].grid(True)
-    axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axs[1].plot(epochs, stats["val_known_mse"], 
-                label="Val MSE Known Entries", color='tab:green')
-    axs[1].plot(epochs, stats["val_unknown_mse"], 
-                label="Val MSE Unknown Entries", color='tab:orange')
-    axs[1].plot(epochs, stats["variance"], 
-                label="Variance of Reconstructed Entries", color='tab:red')
-    axs[1].set_title("Validation Loss & Variance")
-    axs[1].set_xlabel("Epoch")
-    axs[1].set_ylabel("Metric")
-    axs[1].grid(True)
-    axs[1].legend()
-    axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-    fig.tight_layout()
-    fig.savefig(f"{filename_base}_loss_metrics.png")
-    plt.close(fig)
-    # Plot spectral diagnostics
-    fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
-    ax.plot(epochs, stats["nuclear_norm"], label="Nuclear Norm", color='tab:purple')
-    ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap", color='tab:orange')
-    ax.axhline(y=true_nuclear_mean, color='gray', linestyle='--', 
-               label="Ground Truth Mean Nuclear Norm")
-    ax.set_title("Spectral Properties Over Epochs")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Singular Value Scale")
-    ax.grid(True)
-    ax.legend()
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    fig.tight_layout()
-    fig.savefig(f"{filename_base}_spectral_diagnostics.png")
-    plt.close(fig)
-
-
 class DotGATLayer(nn.Module):
     def __init__(self, in_features, out_features, dropout):
         super().__init__()
@@ -134,13 +90,13 @@ class DotGATLayer(nn.Module):
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
         #self.forward_proj = nn.Linear(out_features, out_features)
+        self.Swish = Swish()
         self.forward_proj = nn.Sequential(
-            Swish(),
+            Swish(), nn.LayerNorm(out_features), 
             nn.Linear(out_features, out_features),
-            Swish(),
+            Swish(), nn.LayerNorm(out_features), 
             nn.Linear(out_features, out_features),
         )
-        self.Swish = Swish()
         self.norm = nn.LayerNorm(out_features)
         self.dropout = dropout
         self.scale = math.sqrt(out_features)
@@ -187,9 +143,9 @@ class DistributedDotGAT(nn.Module):
         #])
         self.agent_input_proj = nn.Sequential(
             nn.Linear(input_dim, hidden_dim, bias=False),
-            Swish(),
+            Swish(), nn.LayerNorm(hidden_dim), 
             nn.Linear(hidden_dim, hidden_dim, bias=False),
-            Swish(),
+            Swish(), nn.LayerNorm(hidden_dim), 
             nn.Linear(hidden_dim, hidden_dim, bias=False),
         )
 
@@ -232,23 +188,19 @@ class DistributedDotGAT(nn.Module):
         #self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.maxrank = 2 #min(self.n // 2, self.m // 2)
         self.U_proj = nn.Sequential(
-            #nn.Linear(hidden_dim, hidden_dim, bias=False),
-            #Swish(),
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
+            Swish(), nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, self.n * self.maxrank, bias=False),
         )
         self.V_proj = nn.Sequential(
-            #nn.Linear(hidden_dim, hidden_dim, bias=False),
-            #Swish(),
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
+            Swish(), nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, self.m * self.maxrank, bias=False),
         )
 
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
         h = self.agent_input_proj(x)  # [B, A, hidden_dim]
-        #v2:h = torch.stack([
-        #    self.agent_input_projs[i](x[:, i, :])  # [batch, hidden_dim] for agent i
-        #    for i in range(self.num_agents)
-        #], dim=1)  # -> [batch, num_agents, hidden_dim]
 
         for _ in range(self.message_steps):
             #head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
@@ -357,8 +309,8 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                     # of the global known entries
                     # control expected agent overlap by tweaking agent_sample_size range
                     agent_sample_size = np.random.randint(
-                        int(0.6 * target_known // self.num_agents),
-                        int(1.2 * target_known // self.num_agents) + 1
+                        2 * int(0.6 * target_known // self.num_agents),
+                        2 * int(1.2 * target_known // self.num_agents) + 1
                     )
                     sample_idx = known_global_idx[
                         torch.randint(len(known_global_idx), (agent_sample_size,))

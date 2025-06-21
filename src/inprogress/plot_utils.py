@@ -4,8 +4,51 @@ import os
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import MaxNLocator
 
 
+def plot_stats(stats, filename_base, true_nuclear_mean):
+    epochs = np.arange(1, len(stats["train_loss"]) + 1)
+    # Plot loss-related metrics in two panels
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
+    axs[0].plot(epochs, stats["train_loss"], label="Train Loss", color='tab:blue')
+    axs[0].set_title("Training Loss")
+    axs[0].set_xlabel("Epoch")
+    axs[0].set_ylabel("Loss")
+    axs[0].grid(True)
+    axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
+    axs[1].plot(epochs, stats["val_known_mse"], 
+                label="Val MSE Known Entries", color='tab:green')
+    axs[1].plot(epochs, stats["val_unknown_mse"], 
+                label="Val MSE Unknown Entries", color='tab:orange')
+    axs[1].plot(epochs, stats["variance"], 
+                label="Variance of Reconstructed Entries", color='tab:red')
+    axs[1].set_title("Validation Loss & Variance")
+    axs[1].set_xlabel("Epoch")
+    axs[1].set_ylabel("Metric")
+    axs[1].grid(True)
+    axs[1].legend()
+    axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+    fig.tight_layout()
+    fig.savefig(f"{filename_base}_loss_metrics.png")
+    plt.close(fig)
+    # Plot spectral diagnostics
+    fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
+    ax.plot(epochs, stats["nuclear_norm"], label="Nuclear Norm", color='tab:purple')
+    ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap", color='tab:orange')
+    ax.axhline(y=true_nuclear_mean, color='gray', linestyle='--', 
+               label="Ground Truth Mean Nuclear Norm")
+    ax.set_title("Spectral Properties Over Epochs")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Singular Value Scale")
+    ax.grid(True)
+    ax.legend()
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    fig.tight_layout()
+    fig.savefig(f"{filename_base}_spectral_diagnostics.png")
+    plt.close(fig)
+    
+    
 def plot_connectivity_matrices(directory, prefix, max_cols=5, cmap='coolwarm'):
     # Gather all saved connectivity matrices
     files = sorted(glob.glob(os.path.join(directory, f"{prefix}_adj_epoch*.npy")))

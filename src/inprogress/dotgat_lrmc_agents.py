@@ -142,11 +142,11 @@ class DistributedDotGAT(nn.Module):
         #    nn.Linear(input_dim, hidden_dim, bias=False) for _ in range(num_agents)
         #])
         self.agent_input_proj = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(hidden_dim), 
-            nn.Linear(hidden_dim, hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(hidden_dim), 
-            nn.Linear(hidden_dim, hidden_dim, bias=False),
+            nn.Linear(input_dim, 2 * hidden_dim, bias=False),
+            Swish(), nn.LayerNorm(2 * hidden_dim), 
+            nn.Linear(2 * hidden_dim, 2 * hidden_dim, bias=False),
+            Swish(), nn.LayerNorm(2 * hidden_dim), 
+            nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
         )
 
         # Generate small-world graph
@@ -185,17 +185,18 @@ class DistributedDotGAT(nn.Module):
         ])
 
         self.swish = Swish()
+        self.norm = nn.LayerNorm(self.n * self.m)
         #self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.maxrank = 2 #min(self.n // 2, self.m // 2)
         self.U_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, self.n * self.maxrank, bias=False),
+            nn.Linear(hidden_dim, 2 * hidden_dim),
+            Swish(), nn.LayerNorm(2 * hidden_dim),
+            nn.Linear(2 * hidden_dim, self.n * self.maxrank, bias=False),
         )
         self.V_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, self.m * self.maxrank, bias=False),
+            nn.Linear(hidden_dim, 2 * hidden_dim),
+            Swish(), nn.LayerNorm(2 * hidden_dim),
+            nn.Linear(2 * hidden_dim, self.m * self.maxrank, bias=False),
         )
 
     def forward(self, x):
@@ -211,7 +212,6 @@ class DistributedDotGAT(nn.Module):
             stacked = torch.stack(head_outputs)  # [num_heads, B, A, hidden_dim]
             abs_vals = torch.abs(stacked)
             max_indices = torch.argmax(abs_vals, dim=0)  # [B, A, hidden_dim]
-
             # Convert to [B, A, hidden_dim, num_heads] for indexing
             stacked = stacked.permute(1, 2, 3, 0).contiguous()  # [B, A, H, num_heads]
             max_indices = max_indices.unsqueeze(-1)  # [B, A, H, 1]
@@ -223,7 +223,7 @@ class DistributedDotGAT(nn.Module):
         V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, mr]
 
         # Compute H = U @ Vᵀ for each agent
-        H = torch.matmul(U, V.transpose(-1, -2))  # [B, A, n, m]
+        H = torch.matmul(U, V.transpose(-1, -2)) # [B, A, n, m]
         H = H.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
 
         # Aggregate across agents: H.mean(dim=1)  # [B, n*m]
@@ -239,13 +239,13 @@ class Aggregator(nn.Module):
     We hope this is flexible enough to let the model learn how to downweight
     non-informative agent outputs (e.g. near-zero).
     """
-    def __init__(self, num_agents, output_dim, hidden_dim=64):
+    def __init__(self, num_agents, output_dim, hidden_dim=128):
         super().__init__()
         self.num_agents = num_agents
         self.output_dim = output_dim
         self.gate_mlp = nn.Sequential(
             nn.Linear(output_dim, hidden_dim),
-            nn.ReLU(),
+            nn.ReLU(), 
             nn.Linear(hidden_dim, 1)
         )
 
@@ -261,7 +261,7 @@ class Aggregator(nn.Module):
         weights = F.softmax(gates, dim=1)     # [B, A, 1]
 
         weighted_output = agent_outputs * weights  # [B, A, D]
-        return weighted_output.sum(dim=1)          # [B, D]
+        return weighted_output.sum(dim=1)     # [B, D]
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
@@ -350,23 +350,25 @@ def spectral_penalty(output, rank, evalmode=False):
         U, S, Vt = torch.linalg.svd(output, full_matrices=False)
     except RuntimeError:
         S = torch.linalg.svdvals(output)
+    nuc = S.sum()
     sum_rest = S[rank:].sum()
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
-    gap = (s_last - s_next)
     svdcount = len(S) # or min(output.shape)
-    ratio = sum_rest / (s_last + 1e-6)
-    penalty = sum_rest/(svdcount-rank) + ratio #
-    if s_last > 2 * svdcount:
-        penalty += (s_last - svdcount)/svdcount ** 2
-    elif s_last < svdcount / 2:
-        penalty += (svdcount - s_last)/svdcount ** 2
     if evalmode:
+        gap = (s_last - s_next)
         return gap
     else:
+        #ratio = sum_rest / (s_last + 1e-6)
+        penalty = sum_rest/(svdcount-rank) #+ ratio
+        #penalty = 0
+        if nuc > (2 * svdcount):
+            penalty += nuc/svdcount
+        elif nuc < (svdcount // 2):
+            penalty -= nuc/svdcount
         return penalty
 
-def train(model, aggregator, loader, optimizer, theta, criterion, rank, 
+def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank, 
           device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.train()
     total_loss = 0
@@ -381,9 +383,8 @@ def train(model, aggregator, loader, optimizer, theta, criterion, rank,
         target = batch.y.view(batch_size, -1)
         reconstructionloss = criterion(prediction, target)
         penalty = sum(
-            spectral_penalty(out[i], rank) for i in range(batch_size)
-        ) / batch_size
-        #diversity = agent_diversity_penalty(out)  # out: [B, A, D]
+            spectral_penalty(prediction[i].view(n,m), rank) for i in range(batch_size)
+        )
         loss = theta * reconstructionloss + (1 - theta) * penalty
         # Uncomment following lines to try variance penalty.
         # This seems to prevent learning any useful solutions for the other components of the loss
@@ -424,10 +425,10 @@ def evaluate(model, aggregator, loader, criterion, n, m, rank,
             matrix_2d = pred_i.view(n, m)
             nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
             # Spectral penalty metrics
-            gap = spectral_penalty(out[i], rank, evalmode=True)  # [num_agents, n*m]
+            gap = spectral_penalty(matrix_2d, rank, evalmode=True) 
             gaps.append(gap)
             # Variance of the agent outputs
-            variances.append(out[i].var().item())
+            variances.append(matrix_2d.var().item())
     return (
         np.mean(known_mse) if known_mse else float('nan'),
         np.mean(unknown_mse) if unknown_mse else float('nan'),
@@ -562,12 +563,12 @@ if __name__ == '__main__':
         batch = next(iter(train_loader)).to(device)
         x = batch.x.view(batch.num_graphs, model.num_agents, -1)
         out = model(x)
-        recon = out.mean(dim=1)
+        recon = aggregator(out)
         print("Initial output variance:", recon.var().item())
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
-            model, aggregator, train_loader, optimizer, args.theta, criterion, args.r)
+            model, aggregator, train_loader, optimizer, args.theta, criterion, args.n, args.m, args.r)
         val_known, val_unknown, nuc, var, gap = evaluate(
             model, aggregator, val_loader, criterion, args.n, args.m, args.r)
         

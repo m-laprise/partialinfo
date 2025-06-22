@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 from dotgat_lrmc_agents import (
     AgentMatrixReconstructionDataset,
-    MultiHeadDotGAT,
+    Aggregator,
+    DistributedDotGAT,
     evaluate,
     spectral_penalty,
     train,
@@ -70,14 +71,14 @@ def test_model_forward_pass(setup_dataset):
     Ensure the GAT model forward pass produces expected output dimensions.
     """
     print("\n[TEST] Verifying model forward pass output shape...")
-    first_sample = setup_dataset[0]
-    model = MultiHeadDotGAT(
-        in_features=first_sample.x.shape[1],
-        hidden_features=32,
-        output_dim=first_sample.y.shape[0],  # inferred directly
+    model = DistributedDotGAT(
+        input_dim=setup_dataset.input_dim,
+        hidden_dim=32,
+        n=setup_dataset.n,
+        m=setup_dataset.m,
+        num_agents=setup_dataset.num_agents,
         num_heads=2,
-        dropout=0.1,
-        agg_mode='concat'
+        dropout=0.1
     ).to(device)
     model.eval()
     sample = setup_dataset[0].to(device)
@@ -91,7 +92,7 @@ def test_spectral_penalty_behavior():
     """
     print("\n[TEST] Evaluating spectral penalty structure and stability...")
     mat = torch.randn(5, 5)
-    penalty, first_sv, gap = spectral_penalty(mat)
+    penalty, first_sv, gap = spectral_penalty(mat, rank=2)
     assert penalty >= 0
     assert gap >= 0
     assert isinstance(penalty, torch.Tensor) or isinstance(penalty, float)
@@ -104,20 +105,29 @@ def test_training_and_eval_loop(setup_dataset):
     """
     print("\n[TEST] Running training and evaluation loop...")
     loader = DataLoader(setup_dataset, batch_size=2)
-    model = MultiHeadDotGAT(
-        in_features=setup_dataset.input_dim,
-        hidden_features=32,
-        output_dim=setup_dataset.n * setup_dataset.m,
+    model = DistributedDotGAT(
+        input_dim=setup_dataset.input_dim,
+        hidden_dim=32,
+        n=setup_dataset.n,
+        m=setup_dataset.m,
+        num_agents=setup_dataset.num_agents,
         num_heads=2,
-        dropout=0.1,
-        agg_mode='concat'
+        dropout=0.1
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    aggregator = Aggregator(
+        num_agents=setup_dataset.num_agents, output_dim=setup_dataset.n * setup_dataset.m
+    ).to(device)
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + list(aggregator.parameters()), lr=0.001
+    )
     criterion = torch.nn.MSELoss()
-
-    loss = train(model, loader, optimizer, theta=0.95, criterion=criterion, device=device)
+    
+    loss = train(model, aggregator, loader, optimizer, 
+                 theta=0.95, criterion=criterion, n=setup_dataset.n, m=setup_dataset.m, rank=setup_dataset.r,
+                 device=device)
     assert loss > 0
-    val_known, val_unknown, _, _, _ = evaluate(model, loader, criterion, 8, 8)
+    val_known, val_unknown, _, _, _ = evaluate(
+        model, aggregator, loader, criterion, n=setup_dataset.n, m=setup_dataset.m, rank=setup_dataset.r, device=device)
     print(f"Train Loss: {loss:.4f} | Eval Known: {val_known:.4f} | Eval Unknown: {val_unknown:.4f}")
     assert val_known >= 0 and val_unknown >= 0
     print("PASSED: Training and evaluation cycle completed correctly.")
@@ -144,11 +154,15 @@ def test_agent_with_no_entries():
     zero_agents = [(agent == 0).all().item() for agent in sample.x]
     assert any(zero_agents)
 
-    model = MultiHeadDotGAT(
-        in_features=dataset.input_dim,
-        hidden_features=16, 
-        output_dim=dataset.n * dataset.m,
-        num_heads=2, dropout=0.0).to(device)
+    model = DistributedDotGAT(
+        input_dim=dataset.input_dim,
+        hidden_dim=16,
+        n=dataset.n,
+        m=dataset.m,
+        num_agents=dataset.num_agents,
+        num_heads=2,
+        dropout=0
+    ).to(device)
     try:
         model(sample.x)
         print("PASSED: Model handles zero-entry agents without crashing.")
@@ -160,11 +174,14 @@ def test_message_passing_effect(setup_dataset):
     Verify that the model modifies inputs through message passing.
     """
     print("\n[TEST] Verifying message passing alters agent representations (is not a no-op)...")
-    model = MultiHeadDotGAT(
-        in_features=setup_dataset.input_dim,
-        hidden_features=32, 
-        output_dim=setup_dataset.n * setup_dataset.m,
-        num_heads=2, dropout=0.0
+    model = DistributedDotGAT(
+        input_dim=setup_dataset.input_dim,
+        hidden_dim=32,
+        n=setup_dataset.n,
+        m=setup_dataset.m,
+        num_agents=setup_dataset.num_agents,
+        num_heads=2,
+        dropout=0.1
     ).to(device)
     model.eval()
     sample = setup_dataset[0].to(device)
@@ -181,22 +198,26 @@ def test_spectral_penalty_reduces():
         num_graphs=4, n=8, m=8, r=2, num_agents=4
     )
     loader = DataLoader(dataset, batch_size=2)
-    first_sample = dataset[0]
-    model = MultiHeadDotGAT(
-        in_features=first_sample.x.shape[1],
-        hidden_features=32,
-        output_dim=first_sample.y.shape[0],  # inferred directly
+    model = DistributedDotGAT(
+        input_dim=dataset.input_dim,
+        hidden_dim=32,
+        n=dataset.n,
+        m=dataset.m,
+        num_agents=dataset.num_agents,
         num_heads=2,
-        dropout=0.1,
-        agg_mode='concat'
+        dropout=0.1
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    aggregator = Aggregator(
+        num_agents=4, output_dim=8 * 8
+    ).to(device)
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + list(aggregator.parameters()), lr=0.001
+    )
     criterion = torch.nn.MSELoss()
-
     norms = []
     for _ in range(5):
-        train(model, loader, optimizer, theta=0.5, criterion=criterion, device=device)
-        _, _, nuclear, _, _ = evaluate(model, loader, criterion, 8, 8)
+        train(model, aggregator, loader, optimizer, theta=0.5, criterion=criterion, n=8, m=8, rank=2, device=device)
+        _, _, nuclear, _, _ = evaluate(model, aggregator, loader, criterion=criterion, n=8, m=8, rank=2, device=device)
         norms.append(nuclear)
     assert norms[-1] <= norms[0] or abs(norms[-1] - norms[0]) < 1e-3
     print("PASSED: Spectral penalty reduces over training.")
@@ -209,11 +230,14 @@ def test_wide_matrix_size():
     dataset = AgentMatrixReconstructionDataset(
         num_graphs=2, n=4, m=64, r=3, num_agents=4
     ).to(device)
-    model = MultiHeadDotGAT(
-        in_features=dataset.input_dim, 
-        hidden_features=64, 
-        output_dim=dataset.n * dataset.m, 
-        num_heads=2, dropout=0.1
+    model = DistributedDotGAT(
+        input_dim=dataset.input_dim,
+        hidden_dim=32,
+        n=dataset.n,
+        m=dataset.m,
+        num_agents=dataset.num_agents,
+        num_heads=2,
+        dropout=0.1
     ).to(device)
     out = model(dataset[0].x)
     assert out.shape == (dataset.num_agents, dataset.n * dataset.m)
@@ -228,11 +252,14 @@ def test_agent_ensemble_aggregation_behavior():
         num_graphs=1, n=8, m=8, r=2, num_agents=4
     )
     sample = dataset[0].to(device)
-    model = MultiHeadDotGAT(
-        in_features=dataset.input_dim,
-        hidden_features=32, 
-        output_dim=dataset.n * dataset.m, 
-        num_heads=2, dropout=0.0
+    model = DistributedDotGAT(
+        input_dim=dataset.input_dim,
+        hidden_dim=32,
+        n=dataset.n,
+        m=dataset.m,
+        num_agents=dataset.num_agents,
+        num_heads=2,
+        dropout=0.1
     ).to(device)
     model.eval()
     out = model(sample.x)

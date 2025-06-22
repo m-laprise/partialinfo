@@ -113,7 +113,7 @@ class DotGATLayer(nn.Module):
 
         # Compute scaled dot-product attention scores
         scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
-        scores = scores + connectivity  # Add learnable connectivity bias
+        scores = scores #+ connectivity  # Add learnable connectivity bias
 
         # Full attention (no top-k)
         alpha = F.softmax(scores, dim=-1)
@@ -148,9 +148,9 @@ class DistributedDotGAT(nn.Module):
             Swish(), nn.LayerNorm(2 * hidden_dim), 
             nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
         )
-
+        self.connectivity = torch.ones(num_agents, num_agents)
         # Generate small-world graph
-        G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
+        """         G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
         A = torch.zeros(num_agents, num_agents)
         for i, j in G.edges():
             A[i, j] = 1.0
@@ -177,7 +177,7 @@ class DistributedDotGAT(nn.Module):
         def gradient_mask_hook(grad):
             return grad * self.adj_grad_mask
 
-        self.connectivity.register_hook(gradient_mask_hook)
+        self.connectivity.register_hook(gradient_mask_hook) """
         
         self.gat_heads = nn.ModuleList([
             DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
@@ -187,7 +187,7 @@ class DistributedDotGAT(nn.Module):
         self.swish = Swish()
         self.norm = nn.LayerNorm(self.n * self.m)
         #self.output_proj = nn.Linear(hidden_dim, output_dim)
-        self.maxrank = 2 #min(self.n // 2, self.m // 2)
+        self.maxrank = min(self.n // 2, self.m // 2)
         self.U_proj = nn.Sequential(
             nn.Linear(hidden_dim, 2 * hidden_dim),
             Swish(), nn.LayerNorm(2 * hidden_dim),
@@ -219,11 +219,11 @@ class DistributedDotGAT(nn.Module):
         #out = self.output_proj(h)
         B, A, H = h.shape
         # Compute U and V from shared projections
-        U = self.U_proj(h).view(B, A, self.n, self.maxrank)   # [B, A, n, mr]
+        U = self.U_proj(h).view(B, A, self.n, self.maxrank)  # [B, A, n, mr]
         V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, mr]
 
         # Compute H = U @ Vᵀ for each agent
-        H = torch.matmul(U, V.transpose(-1, -2)) # [B, A, n, m]
+        H = torch.matmul(U, V.transpose(-1, -2)) / self.maxrank # [B, A, n, m]
         H = H.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
 
         # Aggregate across agents: H.mean(dim=1)  # [B, n*m]
@@ -248,6 +248,7 @@ class Aggregator(nn.Module):
             nn.ReLU(), 
             nn.Linear(hidden_dim, 1)
         )
+        #self.norm = nn.LayerNorm(output_dim)
 
     def forward(self, agent_outputs):
         """
@@ -277,12 +278,20 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.view_mode = view_mode
         self.input_dim = n * m if view_mode == 'sparse' else min(n * m, 128)
         self.nuclear_norm_mean = 0.0
+        self.gap_mean = 0.0
+        self.agent_overlap_mean = 0.0
+        self.agent_endowment_mean = 0.0
+        self.actual_known_mean = 0.0
         super().__init__('.')
         self.data, self.slices = self._generate()
     
-    def _generate(self):
+    def _generate(self, verbose=True):
         data_list = []
         norms = []
+        gaps = []
+        agent_overlaps = []
+        agent_endowments = []
+        actual_knowns = []
         total_entries = self.n * self.m
         target_known = int(self.density * total_entries)
         for _ in range(self.num_graphs):
@@ -292,26 +301,31 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             M = U @ V.T + self.sigma * np.random.randn(self.n, self.m)
             M_tensor = torch.tensor(M, dtype=torch.float32).view(-1)
             norms.append(torch.linalg.norm(M_tensor.view(self.n, self.m), ord='nuc').item())
+            S = torch.linalg.svdvals(M_tensor.view(self.n, self.m))
+            gaps.append(S[self.r - 1] - S[self.r])
             # Controlled global known vs secret mask
             all_indices = torch.randperm(total_entries)
             known_global_idx = all_indices[:target_known]
             global_mask = torch.zeros(total_entries, dtype=torch.bool)
             global_mask[known_global_idx] = True
-            mask_tensor = global_mask.clone()
             # Build observed tensor with zeros at unknowns
             observed_tensor = M_tensor.clone()
             observed_tensor[~global_mask] = 0.0
             # Agent-specific views
             if self.view_mode == 'sparse':
                 features = []
-                for _ in range(self.num_agents):
+                for i in range(self.num_agents):
                     # Each agent samples (with replacement) a variable-sized subset 
                     # of the global known entries
                     # control expected agent overlap by tweaking agent_sample_size range
                     agent_sample_size = np.random.randint(
-                        2 * int(0.6 * target_known // self.num_agents),
-                        2 * int(1.2 * target_known // self.num_agents) + 1
+                        int(2.0 * (target_known // self.num_agents)),
+                        int(4.0 * (target_known // self.num_agents)) 
                     )
+                    if agent_sample_size > target_known:
+                        agent_sample_size = target_known
+                        print(f"Warning: agent {i} sampled all known entries.")
+                    agent_endowments.append(agent_sample_size)
                     sample_idx = known_global_idx[
                         torch.randint(len(known_global_idx), (agent_sample_size,))
                     ]
@@ -319,16 +333,40 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                     agent_view[sample_idx] = observed_tensor[sample_idx]
                     features.append(agent_view)
                 x = torch.stack(features)
+                # Create mask tensor from agent views reflecting entries actually seen by any agent
+                mask_tensor = (x != 0).sum(dim=0) > 0
+                
+                overlap_matrix = (torch.stack(features) > 0).float() @ (torch.stack(features) > 0).float().T
+                overlap_matrix /= overlap_matrix.diagonal().view(-1, 1)  # normalize
+                avg_overlap = (overlap_matrix.sum() - overlap_matrix.trace()) / (self.num_agents * (self.num_agents - 1))
+                agent_overlaps.append(avg_overlap)
             else:  # projection view
                 x = torch.stack([
                     torch.matmul(torch.randn(self.input_dim, total_entries), observed_tensor)
                     for _ in range(self.num_agents)
                 ])
+                mask_tensor = global_mask.clone()
+            # Count how many entries known by any agent, avoid double counting
+            actual_known = mask_tensor.sum().item()
+            actual_knowns.append(actual_known)
             # Create Data object
-            data = Data(x=x, y=M_tensor, mask=mask_tensor)
+            data = Data(x=x, y=M_tensor, mask=mask_tensor, nb_known_entries=actual_known)
             data_list.append(data)
         self.nuclear_norm_mean = np.mean(norms)
-        return self.collate(data_list)
+        self.gap_mean = np.mean(gaps)
+        self.agent_overlap_mean = np.mean(agent_overlaps)
+        self.agent_endowment_mean = np.mean(agent_endowments)
+        self.actual_known_mean = np.mean(actual_knowns)
+        output = self.collate(data_list)
+        if verbose:
+            print(f"Generated {self.num_graphs} rank-{self.r} matrices of size {self.n}x{self.m} " +
+                f"with mean nuclear norm {self.nuclear_norm_mean:.4f} and mean gap {self.gap_mean:.4f}.")
+            print(f"Global observed density {self.density:.4f} and noise level {self.sigma:.4f}.")
+            print(f"Total entries {total_entries}; target known entries {target_known}; mean actual known entries {self.actual_known_mean}.")
+            print(f"Entries distributed among {self.num_agents} agents with mean overlap {self.agent_overlap_mean:.4f}.")
+            print(f"Average number of entries per agent: {self.agent_endowment_mean:.4f}.")
+            print(output)
+        return output
 
 
 def spectral_penalty(output, rank, evalmode=False):
@@ -363,9 +401,9 @@ def spectral_penalty(output, rank, evalmode=False):
         penalty = sum_rest/(svdcount-rank) #+ ratio
         #penalty = 0
         if nuc > (2 * svdcount):
-            penalty += nuc/svdcount
+            penalty += nuc/(2 * svdcount) - 1
         elif nuc < (svdcount // 2):
-            penalty -= nuc/svdcount
+            penalty -= (nuc/svdcount) + 1
         return penalty
 
 def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank, 
@@ -386,10 +424,6 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
             spectral_penalty(prediction[i].view(n,m), rank) for i in range(batch_size)
         )
         loss = theta * reconstructionloss + (1 - theta) * penalty
-        # Uncomment following lines to try variance penalty.
-        # This seems to prevent learning any useful solutions for the other components of the loss
-        #var_penalty = F.mse_loss(out.var(), torch.tensor(1.0).to(out.device))
-        #loss += 0.5 * var_penalty
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -417,10 +451,11 @@ def evaluate(model, aggregator, loader, criterion, n, m, rank,
             mask_i = mask[i]        # [n*m]
             known_i = mask_i
             unknown_i = ~mask_i
-            if known_i.any():
+            if known_i.sum() > 0:
                 known_mse.append(criterion(pred_i[known_i], target_i[known_i]).item())
-            if unknown_i.any():
+            if unknown_i.sum() > 0:
                 unknown_mse.append(criterion(pred_i[unknown_i], target_i[unknown_i]).item())
+            assert known_i.sum() + unknown_i.sum() == n * m
             # Reshape for nuclear norm
             matrix_2d = pred_i.view(n, m)
             nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
@@ -490,14 +525,14 @@ def count_parameters(model):
             
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n', type=int, default=20)
-    parser.add_argument('--m', type=int, default=20)
-    parser.add_argument('--r', type=int, default=4)
-    parser.add_argument('--density', type=float, default=0.2)
-    parser.add_argument('--sigma', type=float, default=0.01)
+    parser.add_argument('--n', type=int, default=30)
+    parser.add_argument('--m', type=int, default=30)
+    parser.add_argument('--r', type=int, default=2)
+    parser.add_argument('--density', type=float, default=0.3)
+    parser.add_argument('--sigma', type=float, default=0.0)
     parser.add_argument('--num_agents', type=int, default=30)
     parser.add_argument('--hidden_dim', type=int, default=128)
-    parser.add_argument('--num_heads', type=int, default=4)
+    parser.add_argument('--num_heads', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--epochs', type=int, default=50)
@@ -506,26 +541,30 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--view_mode', type=str, choices=['sparse', 'project'], default='sparse')
     parser.add_argument('--eval_agents', action='store_true', help='Always evaluate agent contributions')
-    parser.add_argument('--steps', type=int, default=3, help='Number of message passing steps')
+    parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps')
+    parser.add_argument('--train_n', type=int, default=1000, help='Number of training matrices')
+    parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
+    parser.add_argument('--test_n', type=int, default=64, help='Number of test matrices')
     
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dataset = AgentMatrixReconstructionDataset(
-        num_graphs=1000, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents,
+    train_set = AgentMatrixReconstructionDataset(
+        num_graphs=args.train_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents,
         view_mode=args.view_mode, density=args.density, sigma=args.sigma
     )
-    train_len = int(0.8 * len(dataset))
-    val_len = len(dataset) - train_len
-    train_set, val_set = torch.utils.data.random_split(
-        dataset, [train_len, val_len])
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
+    val_set = AgentMatrixReconstructionDataset(
+        num_graphs=args.val_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents,
+        view_mode=args.view_mode, density=args.density, sigma=args.sigma
+    )
+
+    train_loader = DataLoader(train_set, batch_size=args.batch_size)
     val_loader = DataLoader(val_set, batch_size=args.batch_size)
 
     model = DistributedDotGAT(
-        input_dim=dataset.input_dim,
+        input_dim=train_set.input_dim,
         hidden_dim=args.hidden_dim,
-        n=dataset.n, m=dataset.m,
+        n=args.n, m=args.m,
         num_agents=args.num_agents,
         num_heads=args.num_heads,
         dropout=args.dropout,
@@ -586,7 +625,7 @@ if __name__ == '__main__':
         #adj_matrix = model.connectivity.detach().cpu().numpy()
         #np.save(f"{file_base}_adj_epoch{epoch}.npy", adj_matrix)
         
-        if val_unknown < best_loss - 1e-5:
+        if True: #val_unknown < best_loss - 1e-5:
             best_loss = val_unknown
             patience_counter = 0
             torch.save(model.state_dict(), checkpoint_path)
@@ -605,13 +644,12 @@ if __name__ == '__main__':
     model.to(device)
     print("Loaded best model from checkpoint.")
 
-    plot_stats(stats, file_base, dataset.nuclear_norm_mean)
+    plot_stats(stats, file_base, train_set.nuclear_norm_mean, train_set.gap_mean)
     
     # Final test evaluation on fresh data
     test_dataset = AgentMatrixReconstructionDataset(
-        num_graphs=64, n=args.n, m=args.m, r=args.r,
-        num_agents=args.num_agents, view_mode=args.view_mode,
-        density=args.density, sigma=args.sigma
+        num_graphs=args.test_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents, 
+        view_mode=args.view_mode, density=args.density, sigma=args.sigma
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(

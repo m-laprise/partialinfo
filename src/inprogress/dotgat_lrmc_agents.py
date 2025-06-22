@@ -267,7 +267,7 @@ class Aggregator(nn.Module):
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
     def __init__(self, num_graphs=1000, n=20, m=20, r=4, 
-                 num_agents=30, view_mode='sparse', density=0.2, sigma=0.01):
+                 num_agents=30, view_mode='sparse', density=0.2, sigma=0, verbose=True):
         self.num_graphs = num_graphs
         self.n = n
         self.m = m
@@ -276,19 +276,22 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.sigma = sigma
         self.num_agents = num_agents
         self.view_mode = view_mode
+        self.verbose = verbose
         self.input_dim = n * m if view_mode == 'sparse' else min(n * m, 128)
         self.nuclear_norm_mean = 0.0
         self.gap_mean = 0.0
+        self.variance_mean = 0.0
         self.agent_overlap_mean = 0.0
         self.agent_endowment_mean = 0.0
         self.actual_known_mean = 0.0
         super().__init__('.')
         self.data, self.slices = self._generate()
     
-    def _generate(self, verbose=True):
+    def _generate(self):
         data_list = []
         norms = []
         gaps = []
+        variances = []
         agent_overlaps = []
         agent_endowments = []
         actual_knowns = []
@@ -303,6 +306,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             norms.append(torch.linalg.norm(M_tensor.view(self.n, self.m), ord='nuc').item())
             S = torch.linalg.svdvals(M_tensor.view(self.n, self.m))
             gaps.append(S[self.r - 1] - S[self.r])
+            variances.append(torch.var(M_tensor).item())
             # Controlled global known vs secret mask
             all_indices = torch.randperm(total_entries)
             known_global_idx = all_indices[:target_known]
@@ -354,18 +358,18 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             data_list.append(data)
         self.nuclear_norm_mean = np.mean(norms)
         self.gap_mean = np.mean(gaps)
+        self.variance_mean = np.mean(variances)
         self.agent_overlap_mean = np.mean(agent_overlaps)
         self.agent_endowment_mean = np.mean(agent_endowments)
         self.actual_known_mean = np.mean(actual_knowns)
         output = self.collate(data_list)
-        if verbose:
+        if self.verbose:
             print(f"Generated {self.num_graphs} rank-{self.r} matrices of size {self.n}x{self.m} " +
                 f"with mean nuclear norm {self.nuclear_norm_mean:.4f} and mean gap {self.gap_mean:.4f}.")
             print(f"Global observed density {self.density:.4f} and noise level {self.sigma:.4f}.")
             print(f"Total entries {total_entries}; target known entries {target_known}; mean actual known entries {self.actual_known_mean}.")
             print(f"Entries distributed among {self.num_agents} agents with mean overlap {self.agent_overlap_mean:.4f}.")
             print(f"Average number of entries per agent: {self.agent_endowment_mean:.4f}.")
-            print(output)
         return output
 
 
@@ -430,6 +434,48 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
         total_loss += loss.item()
     return total_loss / len(loader)
 
+@torch.no_grad()
+def train_additional_stats(
+    model, aggregator, loader, criterion, n, m, rank, 
+    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+):
+    model.eval()
+    t_known_mse, t_unknown_mse, t_nuclear_norms, t_variances, t_gaps = [], [], [], [], []
+    for batch in loader:
+        batch = batch.to(device)
+        batch_size = batch.num_graphs
+        # Forward pass
+        x = batch.x.view(batch_size, model.num_agents, -1)
+        out = model(x)
+        prediction = aggregator(out)  # [batch_size, n*m]
+        target = batch.y.view(batch_size, -1)  # [batch_size, n*m]
+        mask = batch.mask.view(batch_size, -1)  # [batch_size, n*m]
+        for i in range(batch_size):
+            pred_i = prediction[i]  # [n*m]
+            target_i = target[i]    # [n*m]
+            mask_i = mask[i]        # [n*m]
+            known_i = mask_i
+            unknown_i = ~mask_i
+            if known_i.sum() > 0:
+                t_known_mse.append(criterion(pred_i[known_i], target_i[known_i]).item())
+            if unknown_i.sum() > 0:
+                t_unknown_mse.append(criterion(pred_i[unknown_i], target_i[unknown_i]).item())
+            assert known_i.sum() + unknown_i.sum() == n * m
+            # Reshape for nuclear norm
+            matrix_2d = pred_i.view(n, m)
+            t_nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
+            # Spectral penalty metrics
+            gap = spectral_penalty(matrix_2d, rank, evalmode=True) 
+            t_gaps.append(gap)
+            # Variance of the agent outputs
+            t_variances.append(matrix_2d.var().item())
+    return (
+        np.mean(t_known_mse) if t_known_mse else float('nan'),
+        np.mean(t_unknown_mse) if t_unknown_mse else float('nan'),
+        np.mean(t_nuclear_norms),
+        np.mean(t_variances),
+        np.mean(t_gaps),
+    )
 
 @torch.no_grad()
 def evaluate(model, aggregator, loader, criterion, n, m, rank, 
@@ -555,7 +601,7 @@ if __name__ == '__main__':
     )
     val_set = AgentMatrixReconstructionDataset(
         num_graphs=args.val_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents,
-        view_mode=args.view_mode, density=args.density, sigma=args.sigma
+        view_mode=args.view_mode, density=args.density, sigma=args.sigma, verbose=False
     )
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size)
@@ -586,11 +632,16 @@ if __name__ == '__main__':
     
     stats = {
         "train_loss": [],
+        "t_known_mse": [],
+        "t_unknown_mse": [],
+        "t_nuclear_norm": [],
+        "t_variance": [],
+        "t_spectral_gap": [],
         "val_known_mse": [],
         "val_unknown_mse": [],
-        "nuclear_norm": [],
-        "variance": [],
-        "spectral_gap": []
+        "val_nuclear_norm": [],
+        "val_variance": [],
+        "val_spectral_gap": []
     }
     file_base = unique_filename()
     checkpoint_path = f"{file_base}_checkpoint.pt"
@@ -607,19 +658,32 @@ if __name__ == '__main__':
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
-            model, aggregator, train_loader, optimizer, args.theta, criterion, args.n, args.m, args.r)
+            model, aggregator, train_loader, optimizer, args.theta, criterion, args.n, args.m, args.r
+        )
+        t_known, t_unknown, t_nuc, t_var, t_gap = train_additional_stats(
+            model, aggregator, train_loader, criterion, args.n, args.m, args.r
+        )
         val_known, val_unknown, nuc, var, gap = evaluate(
-            model, aggregator, val_loader, criterion, args.n, args.m, args.r)
+            model, aggregator, val_loader, criterion, args.n, args.m, args.r
+        )
         
         stats["train_loss"].append(train_loss)
+        stats["t_known_mse"].append(t_known)
+        stats["t_unknown_mse"].append(t_unknown)
+        stats["t_nuclear_norm"].append(t_nuc)
+        stats["t_variance"].append(t_var)
+        stats["t_spectral_gap"].append(t_gap)
         stats["val_known_mse"].append(val_known)
         stats["val_unknown_mse"].append(val_unknown)
-        stats["nuclear_norm"].append(nuc)
-        stats["variance"].append(var)
-        stats["spectral_gap"].append(gap)
+        stats["val_nuclear_norm"].append(nuc)
+        stats["val_variance"].append(var)
+        stats["val_spectral_gap"].append(gap)
         
-        print(f"Epoch {epoch:03d} | Train: {train_loss:.4f} | Known: {val_known:.4f} | "+
-            f"Unknown: {val_unknown:.4f} | Nucl: {nuc:.2f} | Gap: {gap:.2f} | Var: {var:.4f}")
+        print(f"Epoch {epoch:03d}. Loss: {train_loss:.4f} | Kn: {t_known:.4f} | "+
+            f"Unkn: {t_unknown:.4f} | Nucl: {t_nuc:.2f} | Gap: {t_gap:.2f} | Var: {t_var:.4f}")
+        
+        print(f"--------------------------------------VAL--: K/U: {val_known:.2f} / "+
+            f"{val_unknown:.2f}. NN/G: {nuc:.1f} / {gap:.1f}. Var: {var:.2f}.")
         
         # Save connectivity matrix for visualization
         #adj_matrix = model.connectivity.detach().cpu().numpy()
@@ -644,12 +708,13 @@ if __name__ == '__main__':
     model.to(device)
     print("Loaded best model from checkpoint.")
 
-    plot_stats(stats, file_base, train_set.nuclear_norm_mean, train_set.gap_mean)
+    plot_stats(stats, file_base, 
+               train_set.nuclear_norm_mean, train_set.gap_mean, train_set.variance_mean)
     
     # Final test evaluation on fresh data
     test_dataset = AgentMatrixReconstructionDataset(
         num_graphs=args.test_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents, 
-        view_mode=args.view_mode, density=args.density, sigma=args.sigma
+        view_mode=args.view_mode, density=args.density, sigma=args.sigma, verbose=False
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(

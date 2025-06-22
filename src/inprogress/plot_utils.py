@@ -7,23 +7,31 @@ import numpy as np
 from matplotlib.ticker import MaxNLocator
 
 
-def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean):
+def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_variance):
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
     # Plot loss-related metrics in two panels
-    fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
+    fig, axs = plt.subplots(2, 1, figsize=(10, 12), dpi=320)
     axs[0].plot(epochs, stats["train_loss"], label="Train Loss", color='tab:blue')
     axs[0].set_title("Training Loss")
     axs[0].set_xlabel("Epoch")
     axs[0].set_ylabel("Loss")
     axs[0].grid(True)
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axs[1].plot(epochs, stats["val_known_mse"], 
+    axs[1].plot(epochs, stats["t_known_mse"], 
+                label="Train MSE Known Entries", color='tab:blue')
+    axs[1].plot(epochs, stats["t_unknown_mse"], 
+                label="Train MSE Unknown Entries", color='tab:purple')
+    axs[1].plot(epochs, stats["t_variance"],
+                label="Train Var of Entries", color='tab:grey')
+    axs[1].axhline(y=true_variance, label="Mean True Var of Entries", 
+                   color='tab:grey', linestyle='--')
+    axs[1].plot(epochs, stats["val_known_mse"], linestyle='dotted', 
                 label="Val MSE Known Entries", color='tab:green')
-    axs[1].plot(epochs, stats["val_unknown_mse"], 
+    axs[1].plot(epochs, stats["val_unknown_mse"], linestyle='dotted', 
                 label="Val MSE Unknown Entries", color='tab:orange')
-    axs[1].plot(epochs, stats["variance"], 
-                label="Variance of Reconstructed Entries", color='tab:red')
-    axs[1].set_title("Validation Loss & Variance")
+    axs[1].plot(epochs, stats["val_variance"], linestyle='dotted', 
+                label="Val Var of Entries", color='tab:red')
+    axs[1].set_title("Training & Validation Loss & Variance")
     axs[1].set_xlabel("Epoch")
     axs[1].set_ylabel("Metric")
     axs[1].grid(True)
@@ -33,13 +41,15 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean):
     fig.savefig(f"{filename_base}_loss_metrics.png")
     plt.close(fig)
     # Plot spectral diagnostics
-    fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
-    ax.plot(epochs, stats["nuclear_norm"], label="Nuclear Norm", color='tab:purple')
-    ax.plot(epochs, stats["spectral_gap"], label="Spectral Gap", color='tab:orange')
+    fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=320)
+    ax.plot(epochs, stats["t_nuclear_norm"], label="Train Nuclear Norm", color='tab:purple')
+    ax.plot(epochs, stats["t_spectral_gap"], label="Train Spectral Gap", color='tab:orange')
+    ax.plot(epochs, stats["val_nuclear_norm"], label="Val Nuclear Norm", color='tab:blue', linestyle='dotted')
+    ax.plot(epochs, stats["val_spectral_gap"], label="Val Spectral Gap", color='tab:red', linestyle='dotted')
     ax.axhline(y=true_nuclear_mean, color='tab:purple', linestyle='--', 
-               label="Ground Truth Mean Nuclear Norm")
-    ax.axhline(y=true_gap_mean, color='tab:orange', linestyle='dotted', 
-               label="Ground Truth Mean Spectral Gap")
+               label="Mean True Nuclear Norm")
+    ax.axhline(y=true_gap_mean, color='tab:orange', linestyle='--', 
+               label="Mean True Spectral Gap")
     ax.set_title("Spectral Properties Over Epochs")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Singular Value Scale")

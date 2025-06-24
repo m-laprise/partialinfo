@@ -679,8 +679,8 @@ if __name__ == '__main__':
         stats["val_variance"].append(var)
         stats["val_spectral_gap"].append(gap)
         
-        print(f"Epoch {epoch:03d}. Loss: {train_loss:.4f} | Kn: {t_known:.4f} | "+
-            f"Unkn: {t_unknown:.4f} | Nucl: {t_nuc:.2f} | Gap: {t_gap:.2f} | Var: {t_var:.4f}")
+        print(f"Ep {epoch:03d}. L: {train_loss:.4f} | Kn: {t_known:.4f} | "+
+            f"Unkn: {t_unknown:.4f} | NN: {t_nuc:.2f} | Gap: {t_gap:.2f} | Var: {t_var:.4f}")
         
         print(f"--------------------------------------VAL--: K/U: {val_known:.2f} / "+
             f"{val_unknown:.2f}. NN/G: {nuc:.1f} / {gap:.1f}. Var: {var:.2f}.")
@@ -689,16 +689,24 @@ if __name__ == '__main__':
         #adj_matrix = model.connectivity.detach().cpu().numpy()
         #np.save(f"{file_base}_adj_epoch{epoch}.npy", adj_matrix)
         
-        if True: #val_unknown < best_loss - 1e-5:
-            best_loss = val_unknown
-            patience_counter = 0
+        if t_unknown < best_loss - 1e-5:
+            best_loss = t_unknown
             torch.save(model.state_dict(), checkpoint_path)
             
-        else:
-            patience_counter += 1
-            if patience_counter >= args.patience:
-                print(f"Early stopping at epoch {epoch}.")
-                break
+        if t_unknown < 0.001:
+            print(f"Early stopping at epoch {epoch}.")
+            break
+        
+        #if val_unknown < best_loss - 1e-5:
+        #    best_loss = val_unknown
+        #    patience_counter = 0
+        #    torch.save(model.state_dict(), checkpoint_path)
+        #    
+        #else:
+        #    patience_counter += 1
+        #    if patience_counter >= args.patience:
+        #        print(f"Early stopping at epoch {epoch}.")
+        #        break
 
     # Clear memory (avoid OOM) and load best model
     optimizer.zero_grad(set_to_none=True)

@@ -128,7 +128,9 @@ class DistributedDotGAT(nn.Module):
                  input_dim, # also n x m if vectorized
                  hidden_dim, # internal dim, e.g. 128
                  n, m,
-                 num_agents, num_heads, dropout, message_steps=3):
+                 num_agents, num_heads, dropout, 
+                 #adjacency_mode='none',
+                 message_steps=3):
         super().__init__()
         self.output_dim = n * m
         self.n = n
@@ -459,6 +461,7 @@ if __name__ == '__main__':
     parser.add_argument('--density', type=float, default=0.3)
     parser.add_argument('--sigma', type=float, default=0.0)
     parser.add_argument('--num_agents', type=int, default=30)
+    parser.add_argument('--agentdistrib', type=str, default='all-see-all')
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_heads', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.3)
@@ -477,11 +480,13 @@ if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     train_set = AgentMatrixReconstructionDataset(
-        num_graphs=args.train_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents,
+        num_matrices=args.train_n, n=args.n, m=args.m, r=args.r, 
+        num_agents=args.num_agents, agentdistrib=args.agentdistrib,
         density=args.density, sigma=args.sigma
     )
     val_set = AgentMatrixReconstructionDataset(
-        num_graphs=args.val_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents,
+        num_matrices=args.val_n, n=args.n, m=args.m, r=args.r, 
+        num_agents=args.num_agents, agentdistrib=args.agentdistrib,
         density=args.density, sigma=args.sigma, verbose=False
     )
 
@@ -560,11 +565,12 @@ if __name__ == '__main__':
         stats["val_variance"].append(var)
         stats["val_spectral_gap"].append(gap)
         
-        print(f"Ep {epoch:03d}. L: {train_loss:.4f} | Kn: {t_known:.4f} | "+
-            f"Unkn: {t_unknown:.4f} | NN: {t_nuc:.2f} | Gap: {t_gap:.2f} | Var: {t_var:.4f}")
-        
-        print(f"--------------------------------------VAL--: K/U: {val_known:.2f} / "+
-            f"{val_unknown:.2f}. NN/G: {nuc:.1f} / {gap:.1f}. Var: {var:.2f}.")
+        if epoch % 20 == 0 or epoch == 1:
+            print(f"Ep {epoch:03d}. L: {train_loss:.4f} | Kn: {t_known:.4f} | "+
+                f"Unkn: {t_unknown:.4f} | NN: {t_nuc:.2f} | Gap: {t_gap:.2f} | Var: {t_var:.4f}")
+            
+            print(f"--------------------------------------VAL--: K/U: {val_known:.2f} / "+
+                f"{val_unknown:.2f}. NN/G: {nuc:.1f} / {gap:.1f}. Var: {var:.2f}.")
         
         # Save connectivity matrix for visualization
         #adj_matrix = model.connectivity.detach().cpu().numpy()
@@ -602,7 +608,8 @@ if __name__ == '__main__':
     
     # Final test evaluation on fresh data
     test_dataset = AgentMatrixReconstructionDataset(
-        num_graphs=args.test_n, n=args.n, m=args.m, r=args.r, num_agents=args.num_agents, 
+        num_matrices=args.test_n, n=args.n, m=args.m, r=args.r, 
+        num_agents=args.num_agents, agentdistrib=args.agentdistrib,
         density=args.density, sigma=args.sigma, verbose=False
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)

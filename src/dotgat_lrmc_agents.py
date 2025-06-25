@@ -185,7 +185,6 @@ class DistributedDotGAT(nn.Module):
 
         self.swish = Swish()
         self.norm = nn.LayerNorm(self.n * self.m)
-        #self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.maxrank = min(self.n // 2, self.m // 2)
         self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
         self.V_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
@@ -230,30 +229,33 @@ class Aggregator(nn.Module):
     We hope this is flexible enough to let the model learn how to downweight
     non-informative agent outputs (e.g. near-zero).
     """
-    def __init__(self, num_agents, output_dim, hidden_dim=128):
+    def __init__(self, num_agents, output_dim, hidden_dim=4):
         super().__init__()
         self.num_agents = num_agents
         self.output_dim = output_dim
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(output_dim, hidden_dim),
-            nn.ReLU(), 
-            nn.Linear(hidden_dim, 1)
-        )
-        #self.norm = nn.LayerNorm(output_dim)
+        if num_agents != 1:
+            self.gate_mlp = nn.Sequential(
+                nn.Linear(output_dim, hidden_dim),
+                nn.ReLU(), 
+                nn.Linear(hidden_dim, 1)
+            )
 
     def forward(self, agent_outputs):
         """
-        agent_outputs: [B, A, D] where D = n*m
-        returns: [B, D] aggregated output
+        agent_outputs: [B, A, nm] 
+        returns: [B, nm] aggregated output
         """
-        B, A, D = agent_outputs.shape
+        B, A, nm = agent_outputs.shape
+        assert self.num_agents == A and self.output_dim == nm
+        if self.num_agents == 1:
+            return agent_outputs.squeeze(1)
+        else:
+            # Compute per-agent gates based on their output
+            gates = self.gate_mlp(agent_outputs)  # [B, A, 1]
+            weights = F.softmax(gates, dim=1)     # [B, A, 1]
 
-        # Compute per-agent gates based on their output
-        gates = self.gate_mlp(agent_outputs)  # [B, A, 1]
-        weights = F.softmax(gates, dim=1)     # [B, A, 1]
-
-        weighted_output = agent_outputs * weights  # [B, A, D]
-        return weighted_output.sum(dim=1)     # [B, D]
+            weighted_output = agent_outputs * weights  # [B, A, D]
+            return weighted_output.sum(dim=1)     # [B, D]
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):

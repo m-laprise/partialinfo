@@ -8,17 +8,18 @@ def generate_low_rank_matrix(n, m, r, sigma=0.0):
     """
     Returns: matrix M of shape [n, m] = U @ V.T + noise
     """
-    U = np.random.randn(n, r) / np.sqrt(r)
-    V = np.random.randn(m, r) / np.sqrt(r)
+    U = np.random.randn(n, r)
+    V = np.random.randn(m, r) 
     M = U @ V.T
     if sigma > 0:
         M += sigma * np.random.randn(n, m)
+    M *= 1.0 / np.sqrt(r)
     return torch.tensor(M, dtype=torch.float32)
 
 
 def sample_known_entries(n, m, density):
     total_entries = n * m
-    known_count = int(density * total_entries)
+    known_count = max(int(density * total_entries), 1)
     all_indices = torch.randperm(total_entries)
     known_indices = all_indices[:known_count]
     mask = torch.zeros(total_entries, dtype=torch.bool)
@@ -41,7 +42,10 @@ def build_agent_views(num_agents, known_indices, observed,
 
         elif mode == 'uniform':
             base = len(known_indices) // num_agents
-            sample_size = np.random.randint(int(2.0 * base), int(4.0 * base))
+            sample_size = np.random.randint(
+                min(int(2.0 * base), len(known_indices)), 
+                min(int(4.0 * base), len(known_indices))
+            )
             if sample_size > len(known_indices):
                 oversampled += 1
             sample_size = min(sample_size, len(known_indices))

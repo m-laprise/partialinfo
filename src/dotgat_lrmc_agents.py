@@ -60,7 +60,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-#import networkx as nx
+import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
@@ -88,7 +88,6 @@ class DotGATLayer(nn.Module):
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
-        #self.forward_proj = nn.Linear(out_features, out_features)
         self.Swish = Swish()
         self.forward_proj = nn.Sequential(
             Swish(), nn.LayerNorm(out_features), 
@@ -103,7 +102,7 @@ class DotGATLayer(nn.Module):
     def forward(self, x, connectivity):
         # x: [batch_size, num_agents, hidden_dim]
         B, A, H = x.shape
-
+        
         x = x.view(B * A, H)  # Flatten batch and agents
         # Compute query, key, and value matrices
         Q = self.q_proj(x).view(B, A, -1)
@@ -112,12 +111,15 @@ class DotGATLayer(nn.Module):
 
         # Compute scaled dot-product attention scores
         scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
-        scores = scores #+ connectivity  # Add learnable connectivity bias
 
+        # Add -inf mask where connectivity is 0
+        mask = (connectivity == 0).float() * -1e9  # [A, A]
+        scores = scores + mask        # [B, A, A]
+        
         # Full attention (no top-k)
         alpha = F.softmax(scores, dim=-1)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-
+        
         H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
         out = self.forward_proj(H)
         return self.norm(out)
@@ -129,7 +131,7 @@ class DistributedDotGAT(nn.Module):
                  hidden_dim, # internal dim, e.g. 128
                  n, m,
                  num_agents, num_heads, dropout, 
-                 #adjacency_mode='none',
+                 adjacency_mode='none',
                  message_steps=3):
         super().__init__()
         self.output_dim = n * m
@@ -146,36 +148,43 @@ class DistributedDotGAT(nn.Module):
             Swish(), nn.LayerNorm(2 * hidden_dim), 
             nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
         )
-        self.connectivity = torch.ones(num_agents, num_agents)
-        # Generate small-world graph
-        """         G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
-        A = torch.zeros(num_agents, num_agents)
-        for i, j in G.edges():
-            A[i, j] = 1.0
-            A[j, i] = 1.0  # Ensure symmetry
+        self.adjacency_mode = adjacency_mode
+        if adjacency_mode == 'none':
+            self.connectivity = torch.ones(num_agents, num_agents)
+        elif adjacency_mode == 'learned':
+            G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
+            A = torch.zeros(num_agents, num_agents)
+            for i, j in G.edges():
+                A[i, j] = 1.0
+                A[j, i] = 1.0  # Ensure symmetry
 
-        # Learnable parameter initialized with small noise
-        init_adj = A + 0.01 * torch.randn(num_agents, num_agents)
-        self.connectivity = nn.Parameter(init_adj)
+            # Learnable parameter initialized with small noise
+            init_adj = A + 0.01 * torch.randn(num_agents, num_agents)
+            self.connectivity = nn.Parameter(init_adj)
 
-        # Build a mask: 1 for learnable, 0 for frozen
-        mask = (A == 0).float()  # Where connections are missing
-        mask_flat = mask.view(-1)
-        num_candidates = (mask_flat == 1).nonzero(as_tuple=True)[0]
-        perm = torch.randperm(num_candidates.shape[0])
-        num_learnable = perm.shape[0] // 2
-        learnable_idx = num_candidates[perm[:num_learnable]]
-        final_mask = torch.ones_like(mask_flat)
-        final_mask[mask_flat == 1] = 0.0  # freeze all zero-edges
-        final_mask[learnable_idx] = 1.0   # unfreeze selected
-
-        self.register_buffer('adj_grad_mask', final_mask.view(num_agents, num_agents))
-
-        # Hook to zero gradients for frozen entries
-        def gradient_mask_hook(grad):
-            return grad * self.adj_grad_mask
-
-        self.connectivity.register_hook(gradient_mask_hook) """
+            # Build a mask: 1 for learnable, 0 for frozen
+            mask = (A == 0).float()  # Where connections are missing
+            mask_flat = mask.view(-1)
+            num_candidates = (mask_flat == 1).nonzero(as_tuple=True)[0]
+            perm = torch.randperm(num_candidates.shape[0])
+            num_learnable = perm.shape[0] // 2
+            learnable_idx = num_candidates[perm[:num_learnable]]
+            final_mask = torch.ones_like(mask_flat)
+            final_mask[mask_flat == 1] = 0.0  # freeze all zero-edges
+            final_mask[learnable_idx] = 1.0   # unfreeze selected
+            # register_buffer saves the mask on the model (not trainable
+            self.adj_grad_mask: torch.Tensor
+            self.register_buffer('adj_grad_mask', final_mask.view(num_agents, num_agents))
+            # Hook to zero gradients for frozen entries
+            def gradient_mask_hook(grad):
+                return grad * self.adj_grad_mask
+            # register_hook applies element-wise masking during backprop
+            self.connectivity.register_hook(gradient_mask_hook)
+            # Note: Even if the gradient is zeroed, the value might change due to weight decay or momentum.
+            # to avoid that, I define a freeze method below to call after each optimizer step.
+            
+        else:
+            raise NotImplementedError(f"Invalid adjacency_mode: {adjacency_mode}")
         
         self.gat_heads = nn.ModuleList([
             DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
@@ -193,9 +202,6 @@ class DistributedDotGAT(nn.Module):
         h = self.agent_input_proj(x)  # [B, A, hidden_dim]
 
         for _ in range(self.message_steps):
-            #head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
-            #h = torch.stack(head_outputs).mean(dim=0)
-            #h = self.swish(F.dropout(h, p=self.dropout, training=self.training))
             head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
             # Max-pool across heads based on absolute values
             stacked = torch.stack(head_outputs)  # [num_heads, B, A, hidden_dim]
@@ -205,7 +211,7 @@ class DistributedDotGAT(nn.Module):
             stacked = stacked.permute(1, 2, 3, 0).contiguous()  # [B, A, H, num_heads]
             max_indices = max_indices.unsqueeze(-1)  # [B, A, H, 1]
             h = torch.gather(stacked, dim=-1, index=max_indices).squeeze(-1)  # [B, A, H]
-        #out = self.output_proj(h)
+        
         B, A, H = h.shape
         # Compute U and V from shared projections
         U = self.U_proj(h).view(B, A, self.n, self.maxrank)  # [B, A, n, mr]
@@ -217,6 +223,14 @@ class DistributedDotGAT(nn.Module):
 
         # Aggregate across agents: H.mean(dim=1)  # [B, n*m]
         return H  # [batch, num_agents, output_dim]
+        
+    @torch.no_grad()
+    def freeze_nonlearnable(self):
+        if self.adjacency_mode != 'learned':
+            return  # Nothing to freeze
+        if not hasattr(self, 'adj_grad_mask'):
+            raise RuntimeError("adj_grad_mask not initialized; expected in 'learned' mode.")
+        self.connectivity.data = self.connectivity.data * self.adj_grad_mask
 
 
 class Aggregator(nn.Module):
@@ -315,6 +329,7 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        model.freeze_nonlearnable()
         total_loss += loss.item()
     return total_loss / len(loader)
 
@@ -464,6 +479,7 @@ if __name__ == '__main__':
     parser.add_argument('--agentdistrib', type=str, default='all-see-all')
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_heads', type=int, default=2)
+    parser.add_argument('--adjacency_mode', type=str, default='none', choices=['none', 'learned'])
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--epochs', type=int, default=50)
@@ -500,7 +516,8 @@ if __name__ == '__main__':
         num_agents=args.num_agents,
         num_heads=args.num_heads,
         dropout=args.dropout,
-        message_steps=args.steps
+        message_steps=args.steps,
+        adjacency_mode=args.adjacency_mode
     ).to(device)
     model.apply(init_weights)
     count_parameters(model)

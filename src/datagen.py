@@ -41,20 +41,27 @@ def build_agent_views(num_agents, known_indices, observed,
             endowment = len(known_indices)
 
         elif mode == 'uniform':
-            base = len(known_indices) // num_agents
-            sample_size = np.random.randint(
-                min(int(2.0 * base), len(known_indices)), 
-                min(int(4.0 * base), len(known_indices))
-            )
-            if sample_size > len(known_indices):
-                oversampled += 1
-            sample_size = min(sample_size, len(known_indices))
-            sample_idx = known_indices[
-                torch.randint(len(known_indices), (sample_size,))
-            ]
-            view[sample_idx] = observed[sample_idx]
+            if len(known_indices) == 0:
+                sample_size = 0
+                sample_idx = []
+            else:
+                base = max(1, len(known_indices) // num_agents)
+                low = min(int(2.0 * base), len(known_indices))
+                high = min(int(4.0 * base), len(known_indices))
+                if high <= low:
+                    sample_size = low  
+                else:
+                    sample_size = np.random.randint(low, high)
+                if sample_size > len(known_indices):
+                    oversampled += 1
+                sample_size = min(sample_size, len(known_indices))
+                sample_idx = known_indices[
+                    torch.randint(len(known_indices), (sample_size,))
+                ]
+            view = torch.zeros(total_entries, dtype=torch.float32)
+            if sample_size > 0:
+                view[sample_idx] = observed[sample_idx]
             endowment = sample_size
-
         else:
             raise NotImplementedError(f"Unknown mode: {mode}")
 

@@ -187,16 +187,8 @@ class DistributedDotGAT(nn.Module):
         self.norm = nn.LayerNorm(self.n * self.m)
         #self.output_proj = nn.Linear(hidden_dim, output_dim)
         self.maxrank = min(self.n // 2, self.m // 2)
-        self.U_proj = nn.Sequential(
-            nn.Linear(hidden_dim, 2 * hidden_dim),
-            Swish(), nn.LayerNorm(2 * hidden_dim),
-            nn.Linear(2 * hidden_dim, self.n * self.maxrank, bias=False),
-        )
-        self.V_proj = nn.Sequential(
-            nn.Linear(hidden_dim, 2 * hidden_dim),
-            Swish(), nn.LayerNorm(2 * hidden_dim),
-            nn.Linear(2 * hidden_dim, self.m * self.maxrank, bias=False),
-        )
+        self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
+        self.V_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
 
     def forward(self, x):
         # x: [batch, num_agents, input_dim]

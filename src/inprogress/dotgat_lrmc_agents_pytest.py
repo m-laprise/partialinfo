@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from dotgat_lrmc_agents import (
+from torch_geometric.loader import DataLoader
+
+from main_lrmc_agents import (
     AgentMatrixReconstructionDataset,
     Aggregator,
     DistributedDotGAT,
@@ -12,7 +14,6 @@ from dotgat_lrmc_agents import (
     spectral_penalty,
     train,
 )
-from torch_geometric.loader import DataLoader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

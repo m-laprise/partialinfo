@@ -1,7 +1,7 @@
 """
 Dot product graph attention network for distributed inductive matrix completion, 
 with learned agent-based message passing setup.
-Supports both sparse views and low-dimensional projections as agent inputs.
+Supports sparse views as agent inputs.
 
 Each agent independently receives their own masked view of the matrix via 
 AgentMatrixReconstructionDataset (x: [batch, num_agents, input_dim]). 
@@ -18,7 +18,7 @@ Explicit message passing rounds are controlled by message_steps in DistributedDo
 updates applied iteratively through GAT heads.
 
 Design choices:
-- *Positional embeddings*: Learned Fourier-features positional embeddings of the sparse entries. Many
+- *Positional embeddings*: None in this version. Many
 alternatives are possible, including integrating structural rather than only coordinate information.
 - *Adjacency matrix is not input-dependent*: 
 Currently self.connectivity is shared across all heads and batches, and static per model instance.
@@ -33,7 +33,7 @@ The rest are frozen at zero through gradient masking.
     neighbors), which is also static.
     - Other alternatives would be dynamic thresholding or learned gating. ChatGPT suggests thresholded softmax 
     (Sparsemax or Entmax), attention dropout, learned attention masks, or entropic sparsity.
-- Agents only weakly specialize through agent-specific embeddings.
+- Agents do not specialize. There are no agent-specific embeddings or parameters.
     Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
     additional diversity or specialization losses.
 - No residual connections.
@@ -55,220 +55,24 @@ per agent along with prediction quality.
 
 import argparse
 import gc
-import math
 import os
 from datetime import datetime
 from pathlib import Path
 
-import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 from datagen import AgentMatrixReconstructionDataset
-from plot_utils import plot_connectivity_matrices, plot_stats
-
-
-class Swish(nn.Module):
-    def forward(self, x):
-        return x * torch.sigmoid(x)
+from dotGAT import Aggregator, DistributedDotGAT
+from utils.plotting import plot_stats
 
 
 def unique_filename(base_dir="results", prefix="run"):
     os.makedirs(base_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(base_dir, f"{prefix}_{timestamp}")
-
-
-class DotGATLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout):
-        super().__init__()
-        self.q_proj = nn.Linear(in_features, out_features, bias=False)
-        self.k_proj = nn.Linear(in_features, out_features, bias=False)
-        self.v_proj = nn.Linear(in_features, out_features, bias=False)
-        self.Swish = Swish()
-        self.forward_proj = nn.Sequential(
-            Swish(), nn.LayerNorm(out_features), 
-            nn.Linear(out_features, out_features),
-            Swish(), nn.LayerNorm(out_features), 
-            nn.Linear(out_features, out_features),
-        )
-        self.norm = nn.LayerNorm(out_features)
-        self.dropout = dropout
-        self.scale = math.sqrt(out_features)
-    
-    def forward(self, x, connectivity):
-        # x: [batch_size, num_agents, hidden_dim]
-        B, A, H = x.shape
-        
-        x = x.view(B * A, H)  # Flatten batch and agents
-        # Compute query, key, and value matrices
-        Q = self.q_proj(x).view(B, A, -1)
-        K = self.k_proj(x).view(B, A, -1)
-        V = self.v_proj(x).view(B, A, -1)
-
-        # Compute scaled dot-product attention scores
-        scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
-
-        # Add -inf mask where connectivity is 0
-        mask = (connectivity == 0).float() * -1e9  # [A, A]
-        scores = scores + mask        # [B, A, A]
-        
-        # Full attention (no top-k)
-        alpha = F.softmax(scores, dim=-1)
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        
-        H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
-        out = self.forward_proj(H)
-        return self.norm(out)
-
-
-class DistributedDotGAT(nn.Module):
-    def __init__(self, 
-                 input_dim, # also n x m if vectorized
-                 hidden_dim, # internal dim, e.g. 128
-                 n, m,
-                 num_agents, num_heads, dropout, 
-                 adjacency_mode='none',
-                 message_steps=3):
-        super().__init__()
-        self.output_dim = n * m
-        self.n = n
-        self.m = m
-        self.num_agents = num_agents
-        self.hidden_dim = hidden_dim
-        self.message_steps = message_steps
-        self.dropout = dropout
-        self.agent_input_proj = nn.Sequential(
-            nn.Linear(input_dim, 2 * hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(2 * hidden_dim), 
-            nn.Linear(2 * hidden_dim, 2 * hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(2 * hidden_dim), 
-            nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
-        )
-        self.adjacency_mode = adjacency_mode
-        if adjacency_mode == 'none':
-            self.connectivity = torch.ones(num_agents, num_agents)
-        elif adjacency_mode == 'learned':
-            G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
-            A = torch.zeros(num_agents, num_agents)
-            for i, j in G.edges():
-                A[i, j] = 1.0
-                A[j, i] = 1.0  # Ensure symmetry
-
-            # Learnable parameter initialized with small noise
-            init_adj = A + 0.01 * torch.randn(num_agents, num_agents)
-            self.connectivity = nn.Parameter(init_adj)
-
-            # Build a mask: 1 for learnable, 0 for frozen
-            mask = (A == 0).float()  # Where connections are missing
-            mask_flat = mask.view(-1)
-            num_candidates = (mask_flat == 1).nonzero(as_tuple=True)[0]
-            perm = torch.randperm(num_candidates.shape[0])
-            num_learnable = perm.shape[0] // 2
-            learnable_idx = num_candidates[perm[:num_learnable]]
-            final_mask = torch.ones_like(mask_flat)
-            final_mask[mask_flat == 1] = 0.0  # freeze all zero-edges
-            final_mask[learnable_idx] = 1.0   # unfreeze selected
-            # register_buffer saves the mask on the model (not trainable
-            self.adj_grad_mask: torch.Tensor
-            self.register_buffer('adj_grad_mask', final_mask.view(num_agents, num_agents))
-            # Hook to zero gradients for frozen entries
-            def gradient_mask_hook(grad):
-                return grad * self.adj_grad_mask
-            # register_hook applies element-wise masking during backprop
-            self.connectivity.register_hook(gradient_mask_hook)
-            # Note: Even if the gradient is zeroed, the value might change due to weight decay or momentum.
-            # to avoid that, I define a freeze method below to call after each optimizer step.
-            
-        else:
-            raise NotImplementedError(f"Invalid adjacency_mode: {adjacency_mode}")
-        
-        self.gat_heads = nn.ModuleList([
-            DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
-            for _ in range(num_heads)
-        ])
-
-        self.swish = Swish()
-        self.norm = nn.LayerNorm(self.n * self.m)
-        self.maxrank = min(self.n // 2, self.m // 2)
-        self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
-        self.V_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
-
-    def forward(self, x):
-        # x: [batch, num_agents, input_dim]
-        h = self.agent_input_proj(x)  # [B, A, hidden_dim]
-
-        for _ in range(self.message_steps):
-            head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
-            # Max-pool across heads based on absolute values
-            stacked = torch.stack(head_outputs)  # [num_heads, B, A, hidden_dim]
-            abs_vals = torch.abs(stacked)
-            max_indices = torch.argmax(abs_vals, dim=0)  # [B, A, hidden_dim]
-            # Convert to [B, A, hidden_dim, num_heads] for indexing
-            stacked = stacked.permute(1, 2, 3, 0).contiguous()  # [B, A, H, num_heads]
-            max_indices = max_indices.unsqueeze(-1)  # [B, A, H, 1]
-            h = torch.gather(stacked, dim=-1, index=max_indices).squeeze(-1)  # [B, A, H]
-        
-        B, A, H = h.shape
-        # Compute U and V from shared projections
-        U = self.U_proj(h).view(B, A, self.n, self.maxrank)  # [B, A, n, mr]
-        V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, mr]
-
-        # Compute H = U @ Vᵀ for each agent
-        H = torch.matmul(U, V.transpose(-1, -2)) / self.maxrank # [B, A, n, m]
-        H = H.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
-
-        # Aggregate across agents: H.mean(dim=1)  # [B, n*m]
-        return H  # [batch, num_agents, output_dim]
-        
-    @torch.no_grad()
-    def freeze_nonlearnable(self):
-        if self.adjacency_mode != 'learned':
-            return  # Nothing to freeze
-        if not hasattr(self, 'adj_grad_mask'):
-            raise RuntimeError("adj_grad_mask not initialized; expected in 'learned' mode.")
-        self.connectivity.data = self.connectivity.data * self.adj_grad_mask
-
-
-class Aggregator(nn.Module):
-    """
-    Input-dependent aggregation module. It reads each agent's output,
-    uses a shared MLP to compute per-agent gates based on their output,
-    applies a softmax over agent gates, and then performs weighted sum.
-    
-    We hope this is flexible enough to let the model learn how to downweight
-    non-informative agent outputs (e.g. near-zero).
-    """
-    def __init__(self, num_agents, output_dim, hidden_dim=4):
-        super().__init__()
-        self.num_agents = num_agents
-        self.output_dim = output_dim
-        if num_agents != 1:
-            self.gate_mlp = nn.Sequential(
-                nn.Linear(output_dim, hidden_dim),
-                nn.ReLU(), 
-                nn.Linear(hidden_dim, 1)
-            )
-
-    def forward(self, agent_outputs):
-        """
-        agent_outputs: [B, A, nm] 
-        returns: [B, nm] aggregated output
-        """
-        B, A, nm = agent_outputs.shape
-        assert self.num_agents == A and self.output_dim == nm
-        if self.num_agents == 1:
-            return agent_outputs.squeeze(1)
-        else:
-            # Compute per-agent gates based on their output
-            gates = self.gate_mlp(agent_outputs)  # [B, A, 1]
-            weights = F.softmax(gates, dim=1)     # [B, A, 1]
-
-            weighted_output = agent_outputs * weights  # [B, A, D]
-            return weighted_output.sum(dim=1)     # [B, D]
 
 
 def spectral_penalty(output, rank, evalmode=False):
@@ -291,7 +95,7 @@ def spectral_penalty(output, rank, evalmode=False):
     except RuntimeError:
         S = torch.linalg.svdvals(output)
     nuc = S.sum()
-    sum_rest = S[rank:].sum()
+    #sum_rest = S[rank:].sum()
     s_last = S[rank - 1].item()
     s_next = S[rank].item()
     svdcount = len(S) # or min(output.shape)
@@ -300,8 +104,8 @@ def spectral_penalty(output, rank, evalmode=False):
         return gap
     else:
         #ratio = sum_rest / (s_last + 1e-6)
-        penalty = sum_rest/(svdcount-rank) #+ ratio
-        #penalty = 0
+        #penalty = sum_rest/(svdcount-rank) #+ ratio
+        penalty = 0
         if nuc > (2 * svdcount):
             penalty += nuc/(2 * svdcount) - 1
         elif nuc < (svdcount // 2):
@@ -487,7 +291,7 @@ if __name__ == '__main__':
     parser.add_argument('--theta', type=float, default=0.95, help='Weight for the known entry loss vs penalty')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--eval_agents', action='store_true', help='Always evaluate agent contributions')
-    parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps')
+    parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     parser.add_argument('--train_n', type=int, default=1000, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=64, help='Number of test matrices')

@@ -109,21 +109,38 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
         batch = batch.to(device)
         optimizer.zero_grad()
         batch_size = batch.num_graphs
-        x = batch.x 
-        x = x.view(batch_size, model.num_agents, -1)
-        out = model(x) 
-        prediction = aggregator(out)
-        target = batch.y.view(batch_size, -1)
-        reconstructionloss = criterion(prediction, target)
+
+        # Inputs to the model (agent views)
+        x = batch.x.view(batch_size, model.num_agents, -1)
+        out = model(x)
+
+        # Aggregated matrix prediction
+        prediction = aggregator(out)  # shape: [batch_size, n * m]
+        target = batch.y.view(batch_size, -1)  # shape: [batch_size, n * m]
+        mask = batch.mask.view(batch_size, -1)  # shape: [batch_size, n * m]
+
+        # Compute masked reconstruction loss (only known entries)
+        reconstructionloss = criterion(prediction[mask], target[mask])
+
+        # Spectral penalty applied to full matrix prediction
         penalty = sum(
-            spectral_penalty(prediction[i].view(n,m), rank) for i in range(batch_size)
+            spectral_penalty(prediction[i].view(n, m), rank)
+            for i in range(batch_size)
         )
+
+        # Combined loss
         loss = theta * reconstructionloss + (1 - theta) * penalty
         loss.backward()
+
+        # Gradient clipping and update
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+
+        # Apply structural constraints (e.g., freeze connectivity)
         model.freeze_nonlearnable()
+
         total_loss += loss.item()
+        
     return total_loss / len(loader)
 
 

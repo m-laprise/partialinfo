@@ -16,7 +16,7 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     axs[0].set_xlabel("Epoch")
     axs[0].set_ylabel("Loss")
     axs[0].grid(True)
-    axs[0].set_ylim(0, 1.5)
+    axs[0].set_ylim(0, 2)
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
     axs[1].plot(epochs, stats["t_known_mse"], 
                 label="Train MSE Known Entries", color='tab:blue')
@@ -36,7 +36,7 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     axs[1].set_xlabel("Epoch")
     axs[1].set_ylabel("Metric")
     axs[1].grid(True)
-    axs[1].set_ylim(0, 1.5)
+    axs[1].set_ylim(0, 2)
     axs[1].legend()
     axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
     fig.tight_layout()

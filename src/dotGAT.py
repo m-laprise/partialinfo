@@ -79,11 +79,12 @@ class DistributedDotGAT(nn.Module):
         
         self.agent_input_proj = self._build_input_proj(input_dim, hidden_dim)
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents)
-            
-        self.gat_heads = nn.ModuleList([
-            DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
-            for _ in range(num_heads)
-        ])
+        
+        if message_steps > 0:
+            self.gat_heads = nn.ModuleList([
+                DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
+                for _ in range(num_heads)
+            ])
 
         self.maxrank = min(self.n // 2, self.m // 2)
         self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)

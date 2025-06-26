@@ -55,9 +55,6 @@ per agent along with prediction quality.
 
 import argparse
 import gc
-import os
-from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -66,13 +63,8 @@ from torch_geometric.loader import DataLoader
 
 from datagen import AgentMatrixReconstructionDataset
 from dotGAT import Aggregator, DistributedDotGAT
+from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_stats
-
-
-def unique_filename(base_dir="results", prefix="run"):
-    os.makedirs(base_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(base_dir, f"{prefix}_{timestamp}")
 
 
 def spectral_penalty(output, rank, evalmode=False):
@@ -112,6 +104,7 @@ def spectral_penalty(output, rank, evalmode=False):
             penalty -= (nuc/svdcount) + 1
         return penalty
 
+
 def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank, 
           device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     model.train()
@@ -136,6 +129,7 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
         model.freeze_nonlearnable()
         total_loss += loss.item()
     return total_loss / len(loader)
+
 
 @torch.no_grad()
 def train_additional_stats(
@@ -180,6 +174,7 @@ def train_additional_stats(
         np.mean(t_gaps),
     )
 
+
 @torch.no_grad()
 def evaluate(model, aggregator, loader, criterion, n, m, rank, 
              device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
@@ -222,54 +217,12 @@ def evaluate(model, aggregator, loader, criterion, n, m, rank,
     )
 
 
-@torch.no_grad()
-def evaluate_agent_contributions(model, loader, criterion, n, m, 
-                                 device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
-    model.eval()
-    print("\nEvaluating individual agent contributions...")
-    all_agent_errors = []
-    for batch in loader:
-        batch = batch.to(device)
-        batch_size = batch.num_graphs
-        num_agents = batch.x.shape[0] // batch_size
-        nm = n * m
-        x = batch.x.view(batch_size, model.num_agents, -1)
-        out = model(x)
-        targets = batch.y.view(batch_size, nm)      # [B, n*m]
-        for i in range(batch_size):
-            individual_errors = []
-            for a in range(num_agents):
-                agent_pred = out[i, a]     # [n*m]
-                target = targets[i]        # [n*m]
-                error = criterion(agent_pred, target).item()
-                individual_errors.append((a, error))
-            all_agent_errors.append(individual_errors)
-    # Aggregate and report
-    flat_errors = [err for sample in all_agent_errors for _, err in sample]
-    agent_errors = torch.tensor(flat_errors)
-    agent_mean = agent_errors.mean().item()
-    agent_std = agent_errors.std().item()
-    agent_min = agent_errors.min().item()
-    agent_max = agent_errors.max().item()
-    print(f"Mean agent MSE: {agent_mean:.4f}, Std: {agent_std:.4f}")
-    print(f"Min agent MSE: {agent_min:.4f}, Max: {agent_max:.4f}")
-
-
 def init_weights(m):
     if isinstance(m, nn.Linear):
         #nn.init.xavier_uniform_(m.weight, gain=1.0)
         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
         if m.bias is not None:
             nn.init.zeros_(m.bias)
-            
-            
-def count_parameters(model):
-    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total trainable parameters: {total:,}")
-    print("Breakdown by layer:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(f"{name:60} {param.numel():>10}")
             
             
 if __name__ == '__main__':
@@ -290,7 +243,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--theta', type=float, default=0.95, help='Weight for the known entry loss vs penalty')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
-    parser.add_argument('--eval_agents', action='store_true', help='Always evaluate agent contributions')
+    #parser.add_argument('--eval_agents', action='store_true', help='Always evaluate agent contributions')
     parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     parser.add_argument('--train_n', type=int, default=1000, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
@@ -443,6 +396,6 @@ if __name__ == '__main__':
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
 
     # Agent contribution eval (optional)
-    if test_unknown < 0.1 or args.eval_agents:
-        evaluate_agent_contributions(model, test_loader, criterion, args.n, args.m)
+    #if test_unknown < 0.1 or args.eval_agents:
+    #    evaluate_agent_contributions(model, test_loader, criterion, args.n, args.m)
     

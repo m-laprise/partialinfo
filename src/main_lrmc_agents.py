@@ -67,42 +67,38 @@ from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_stats
 
 
-def spectral_penalty(output, rank, evalmode=False):
-    """
-    Compute spectral penalty for a low rank matrix output.
-    
-    The spectral penalty is defined as the sum of the singular values
-    of the output matrix, excluding the r largest singular values.
-    
-    Additionally, if the largest singular value is greater than 2
-    times the smaller dimension of the output matrix, or if it is
-    less than half the smaller dimension, add a penalty term of
-    (s0 - 2 * N) ** 2 or (N / 2 - s0) ** 2, respectively.
-    
-    Return the spectral penalty, the largest singular value, and the
-    gap between the rth and the next largest singular values.
-    """
+def spectral_penalty(output, rank, evalmode=False, eps=1e-6, gamma=1.0):
     try:
-        U, S, Vt = torch.linalg.svd(output, full_matrices=False)
-    except RuntimeError:
         S = torch.linalg.svdvals(output)
-    nuc = S.sum()
-    #sum_rest = S[rank:].sum()
-    s_last = S[rank - 1].item()
-    s_next = S[rank].item()
-    svdcount = len(S) # or min(output.shape)
+    except RuntimeError:
+        return 0.0
+    #nuc = S.sum()
+    sum_rest = S[rank:].sum()
+    #svdcount = len(S) 
     if evalmode:
-        gap = (s_last - s_next)
-        return gap
-    else:
-        #ratio = sum_rest / (s_last + 1e-6)
-        #penalty = sum_rest/(svdcount-rank) #+ ratio
-        penalty = 0
-        if nuc > (2 * svdcount):
-            penalty += nuc/(2 * svdcount) - 1
-        elif nuc < (svdcount // 2):
-            penalty -= (nuc/svdcount) + 1
-        return penalty
+        return (S[rank - 1] - S[rank]).item()
+
+    # Add soft range constraint on s_max to prevent exploding/shrinking of spectrum
+    s_max = S[0]
+    N = min(output.shape)
+    soft_upper = torch.relu(s_max - 2 * N)
+    soft_lower = torch.relu((N // 2) - s_max)
+    range_penalty = soft_upper**2 + soft_lower**2
+
+    # Final combined penalty
+    penalty = sum_rest/(N - rank) + gamma * range_penalty
+
+    return penalty
+    """
+    #ratio = sum_rest / (s_last + 1e-6)
+    #penalty = sum_rest/(svdcount-rank) #+ ratio
+    penalty = 0
+    if nuc > (2 * svdcount):
+        penalty += nuc/(2 * svdcount) - 1
+    elif nuc < (svdcount // 2):
+        penalty -= (nuc/svdcount) + 1
+    return penalty
+    """
 
 
 def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank, 

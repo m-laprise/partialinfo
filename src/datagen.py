@@ -126,7 +126,24 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             stats["gaps"].append(S[self.r - 1] - S[self.r])
             stats["variances"].append(M_vec.var().item())
 
-            global_mask, known_idx = sample_known_entries(self.n, self.m, self.density)
+            #global_mask, known_idx = sample_known_entries(self.n, self.m, self.density)
+            max_attempts = 10
+            for attempt in range(1, max_attempts + 1):
+                global_mask, known_idx = sample_known_entries(self.n, self.m, self.density)
+                mask_2d = global_mask.view(self.n, self.m)
+                rows_ok = (mask_2d.sum(dim=1) >= self.r).all()
+                cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
+                if rows_ok and cols_ok:
+                    break
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        f"Failed to sample a valid mask after {max_attempts} attempts. "
+                        f"Could not ensure at least {self.r} known entries in each row and column. "
+                        f"Matrix index: {idx}, density: {self.density}, size: {self.n}x{self.m}"
+                    )
+                if self.verbose:
+                    print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
+            
             observed = M_vec.clone()
             observed[~global_mask] = 0.0
 

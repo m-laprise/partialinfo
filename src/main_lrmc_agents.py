@@ -71,7 +71,7 @@ def spectral_penalty(output, rank, evalmode=False, eps=1e-6, gamma=1.0):
     try:
         S = torch.linalg.svdvals(output)
     except RuntimeError:
-        return 0.0
+        return torch.tensor(0.0, device=output.device)
     #nuc = S.sum()
     sum_rest = S[rank:].sum()
     #svdcount = len(S) 
@@ -80,7 +80,7 @@ def spectral_penalty(output, rank, evalmode=False, eps=1e-6, gamma=1.0):
 
     # Add soft range constraint on s_max to prevent exploding/shrinking of spectrum
     s_max = S[0]
-    N = min(output.shape)
+    N = torch.tensor(min(output.shape), device=output.device, dtype=s_max.dtype)
     soft_upper = torch.relu(s_max - 2 * N)
     soft_lower = torch.relu((N // 2) - s_max)
     range_penalty = soft_upper**2 + soft_lower**2
@@ -102,22 +102,22 @@ def spectral_penalty(output, rank, evalmode=False, eps=1e-6, gamma=1.0):
 
 
 def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank, 
-          device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+          device):
     model.train()
     total_loss = 0
     for batch in loader:
-        batch = batch.to(device)
         optimizer.zero_grad()
         batch_size = batch.num_graphs
 
         # Inputs to the model (agent views)
         x = batch.x.view(batch_size, model.num_agents, -1)
+        x = x.to(device)
         out = model(x)
 
         # Aggregated matrix prediction
         prediction = aggregator(out)  # shape: [batch_size, n * m]
-        target = batch.y.view(batch_size, -1)  # shape: [batch_size, n * m]
-        mask = batch.mask.view(batch_size, -1)  # shape: [batch_size, n * m]
+        target = batch.y.view(batch_size, -1).to(device)  # shape: [batch_size, n * m]
+        mask = batch.mask.view(batch_size, -1).to(device)  # shape: [batch_size, n * m]
 
         # Compute masked reconstruction loss (only known entries)
         reconstructionloss = criterion(prediction[mask], target[mask])
@@ -145,88 +145,58 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
 
 
 @torch.no_grad()
-def train_additional_stats(
-    model, aggregator, loader, criterion, n, m, rank, 
-    device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def evaluate(
+    model, aggregator, loader, criterion, n, m, rank, device, 
+    tag: str = "eval"
 ):
     model.eval()
-    t_known_mse, t_unknown_mse, t_nuclear_norms, t_variances, t_gaps = [], [], [], [], []
-    for batch in loader:
-        batch = batch.to(device)
-        batch_size = batch.num_graphs
-        # Forward pass
-        x = batch.x.view(batch_size, model.num_agents, -1)
-        out = model(x)
-        prediction = aggregator(out)  # [batch_size, n*m]
-        target = batch.y.view(batch_size, -1)  # [batch_size, n*m]
-        mask = batch.mask.view(batch_size, -1)  # [batch_size, n*m]
-        for i in range(batch_size):
-            pred_i = prediction[i]  # [n*m]
-            target_i = target[i]    # [n*m]
-            mask_i = mask[i]        # [n*m]
-            known_i = mask_i
-            unknown_i = ~mask_i
-            if known_i.sum() > 0:
-                t_known_mse.append(criterion(pred_i[known_i], target_i[known_i]).item())
-            if unknown_i.sum() > 0:
-                t_unknown_mse.append(criterion(pred_i[unknown_i], target_i[unknown_i]).item())
-            assert known_i.sum() + unknown_i.sum() == n * m
-            # Reshape for nuclear norm
-            matrix_2d = pred_i.view(n, m)
-            t_nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
-            # Spectral penalty metrics
-            gap = spectral_penalty(matrix_2d, rank, evalmode=True) 
-            t_gaps.append(gap)
-            # Variance of the agent outputs
-            t_variances.append(matrix_2d.var().item())
-    return (
-        np.mean(t_known_mse) if t_known_mse else float('nan'),
-        np.mean(t_unknown_mse) if t_unknown_mse else float('nan'),
-        np.mean(t_nuclear_norms),
-        np.mean(t_variances),
-        np.mean(t_gaps),
-    )
-
-
-@torch.no_grad()
-def evaluate(model, aggregator, loader, criterion, n, m, rank, 
-             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
-    model.eval()
     known_mse, unknown_mse, nuclear_norms, variances, gaps = [], [], [], [], []
+
     for batch in loader:
-        batch = batch.to(device)
         batch_size = batch.num_graphs
-        # Forward pass
-        x = batch.x.view(batch_size, model.num_agents, -1)
+
+        x = batch.x.view(batch_size, model.num_agents, -1).to(device)
         out = model(x)
-        prediction = aggregator(out)  # [batch_size, n*m]
-        target = batch.y.view(batch_size, -1)  # [batch_size, n*m]
-        mask = batch.mask.view(batch_size, -1)  # [batch_size, n*m]
+        prediction = aggregator(out)  # [B, nm]
+        target = batch.y.view(batch_size, -1).to(device)
+        mask = batch.mask.view(batch_size, -1).to(device)
+
         for i in range(batch_size):
             pred_i = prediction[i]  # [n*m]
             target_i = target[i]    # [n*m]
             mask_i = mask[i]        # [n*m]
+
             known_i = mask_i
             unknown_i = ~mask_i
+
             if known_i.sum() > 0:
-                known_mse.append(criterion(pred_i[known_i], target_i[known_i]).item())
+                known_mse.append(
+                    criterion(pred_i[known_i], target_i[known_i]).item()
+                )
             if unknown_i.sum() > 0:
-                unknown_mse.append(criterion(pred_i[unknown_i], target_i[unknown_i]).item())
+                unknown_mse.append(
+                    criterion(pred_i[unknown_i], target_i[unknown_i]).item()
+                )
             assert known_i.sum() + unknown_i.sum() == n * m
-            # Reshape for nuclear norm
-            matrix_2d = pred_i.view(n, m)
-            nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
+            
             # Spectral penalty metrics
-            gap = spectral_penalty(matrix_2d, rank, evalmode=True) 
-            gaps.append(gap)
-            # Variance of the agent outputs
+            matrix_2d = pred_i.view(n, m)
+
+            gaps.append(float(spectral_penalty(matrix_2d, rank, evalmode=True)))
+
+            # SVDVALS not implemented for MPS
+            if matrix_2d.device.type == 'mps':
+                matrix_2d = matrix_2d.cpu()
+
+            nuclear_norms.append(torch.linalg.norm(matrix_2d, ord='nuc').item())
             variances.append(matrix_2d.var().item())
+
     return (
-        np.mean(known_mse) if known_mse else float('nan'),
-        np.mean(unknown_mse) if unknown_mse else float('nan'),
-        np.mean(nuclear_norms),
-        np.mean(variances),
-        np.mean(gaps),
+        float(np.mean(known_mse)) if known_mse else float('nan'),
+        float(np.mean(unknown_mse)) if unknown_mse else float('nan'),
+        float(np.mean(nuclear_norms)),
+        float(np.mean(variances)),
+        float(np.mean(gaps)),
     )
 
 
@@ -264,7 +234,9 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() 
+                          #else 'mps' if torch.backends.mps.is_available() 
+                          else 'cpu')
     train_set = AgentMatrixReconstructionDataset(
         num_matrices=args.train_n, n=args.n, m=args.m, r=args.r, 
         num_agents=args.num_agents, agentdistrib=args.agentdistrib,
@@ -323,21 +295,24 @@ if __name__ == '__main__':
     patience_counter = 0
     
     with torch.no_grad():
-        batch = next(iter(train_loader)).to(device)
-        x = batch.x.view(batch.num_graphs, model.num_agents, -1)
+        batch = next(iter(train_loader))
+        x = batch.x.view(batch.num_graphs, model.num_agents, -1).to(device)
         out = model(x)
         recon = aggregator(out)
         print("Initial output variance:", recon.var().item())
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
-            model, aggregator, train_loader, optimizer, args.theta, criterion, args.n, args.m, args.r
+            model, aggregator, train_loader, optimizer, args.theta, criterion, 
+            args.n, args.m, args.r, device
         )
-        t_known, t_unknown, t_nuc, t_var, t_gap = train_additional_stats(
-            model, aggregator, train_loader, criterion, args.n, args.m, args.r
+        t_known, t_unknown, t_nuc, t_var, t_gap = evaluate(
+            model, aggregator, train_loader, criterion, 
+            args.n, args.m, args.r, device, tag="train"
         )
         val_known, val_unknown, nuc, var, gap = evaluate(
-            model, aggregator, val_loader, criterion, args.n, args.m, args.r
+            model, aggregator, val_loader, criterion, 
+            args.n, args.m, args.r, device, tag="val"
         )
         
         stats["train_loss"].append(train_loss)
@@ -352,7 +327,7 @@ if __name__ == '__main__':
         stats["val_variance"].append(var)
         stats["val_spectral_gap"].append(gap)
         
-        if epoch % 20 == 0 or epoch == 1:
+        if epoch % 50 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. L: {train_loss:.4f} | Kn: {t_known:.4f} | "+
                 f"Unkn: {t_unknown:.4f} | NN: {t_nuc:.2f} | Gap: {t_gap:.2f} | Var: {t_var:.4f}")
             
@@ -401,7 +376,9 @@ if __name__ == '__main__':
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(
-        model, aggregator, test_loader, criterion, args.n, args.m, args.r)
+        model, aggregator, test_loader, criterion, 
+        args.n, args.m, args.r, device, tag="test"
+    )
     print(f"Test Set Performance | Known MSE: {test_known:.4f}, Unknown MSE: {test_unknown:.4f}"+
         f" Nuclear Norm: {test_nuc:.2f}, Spectral Gap: {test_gap:.2f}, Variance: {test_var:.4f}")
 

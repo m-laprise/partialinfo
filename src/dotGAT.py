@@ -32,6 +32,7 @@ class DotGATLayer(nn.Module):
     def forward(self, x: torch.Tensor, connectivity: torch.Tensor) -> torch.Tensor:
         # x: [batch_size, num_agents, hidden_dim]
         B, A, H = x.shape
+        connectivity = connectivity.to(x.device)
         
         x = x.view(B * A, H)  # Flatten batch and agents
         # Compute query, key, and value matrices
@@ -77,8 +78,10 @@ class DistributedDotGAT(nn.Module):
         self.dropout = dropout
         self.adjacency_mode = adjacency_mode
         
+        device = torch.device('cuda' if torch.cuda.is_available() 
+                          else 'mps' if torch.backends.mps.is_available() else 'cpu')
         self.agent_input_proj = self._build_input_proj(input_dim, hidden_dim)
-        self.connectivity = self._init_connectivity(adjacency_mode, num_agents)
+        self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
         
         if message_steps > 0:
             self.gat_heads = nn.ModuleList([
@@ -99,27 +102,28 @@ class DistributedDotGAT(nn.Module):
             nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
         )
         
-    def _init_connectivity(self, mode: str, num_agents: int) -> torch.Tensor:
+    def _init_connectivity(self, mode: str, num_agents: int, device: torch.device) -> torch.Tensor:
         if mode == 'none':
-            return torch.ones(num_agents, num_agents)
+            self.register_buffer("connectivity", torch.ones(num_agents, num_agents))
+            return self.connectivity
         elif mode == 'learned':
             G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
-            A = torch.zeros(num_agents, num_agents)
+            A = torch.zeros(num_agents, num_agents, device=device)
             for i, j in G.edges():
                 A[i, j] = A[j, i] = 1.0 # Ensure symmetry
 
             # Learnable parameter initialized with small noise
-            init_adj = A + 0.01 * torch.randn(num_agents, num_agents)
+            init_adj = A + 0.01 * torch.randn(num_agents, num_agents, device=device)
             connectivity = nn.Parameter(init_adj)
 
             # Freeze part of the zero entries
             mask = (A == 0).float()  # Where connections are missing
             flat_mask = mask.view(-1)
             candidates = (flat_mask == 1).nonzero(as_tuple=True)[0]
-            perm = torch.randperm(len(candidates))
+            perm = torch.randperm(len(candidates), device=device)
             num_learnable = len(candidates) // 2
             learnable_idx = candidates[perm[:num_learnable]]
-            final_mask = torch.ones_like(flat_mask)
+            final_mask = torch.ones_like(flat_mask, device=device)
             final_mask[flat_mask == 1] = 0.0  # freeze all zero-edges
             final_mask[learnable_idx] = 1.0   # unfreeze selected
             grad_mask = final_mask.view(num_agents, num_agents)
@@ -134,13 +138,14 @@ class DistributedDotGAT(nn.Module):
             # Note: Even if the gradient is zeroed, the value might change due to weight decay or momentum.
             # to avoid that, I define a freeze method below to call after each optimizer step.
             self.connectivity = connectivity
-            return connectivity
+            return self.connectivity
         else:
             raise ValueError(f"Invalid adjacency_mode: {mode}")
         
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
         for _ in range(self.message_steps):
-            head_outputs = [head(h, self.connectivity.unsqueeze(0)) for head in self.gat_heads]
+            connectivity = self.connectivity.unsqueeze(0)
+            head_outputs = [head(h, connectivity) for head in self.gat_heads]
             stacked = torch.stack(head_outputs)  # [num_heads, B, A, H]
             
             # Max-pool across heads based on absolute values

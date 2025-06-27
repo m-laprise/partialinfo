@@ -11,12 +11,16 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
     # Plot loss-related metrics in two panels
     fig, axs = plt.subplots(2, 1, figsize=(10, 12), dpi=320)
-    axs[0].plot(epochs, stats["train_loss"], label="Train Loss", color='tab:blue')
+    if min(stats["train_loss"]) >= 0:
+        axs[0].plot(epochs, np.log(stats["train_loss"]), label="Train Loss", color='tab:blue')
+    else:
+        log_offset_train_loss = np.log(stats["train_loss"] - min(stats["train_loss"]))
+        axs[0].plot(epochs, log_offset_train_loss, label="Train Loss", color='tab:blue')
     axs[0].set_title("Training Loss")
     axs[0].set_xlabel("Epoch")
-    axs[0].set_ylabel("Loss")
+    axs[0].set_ylabel("Log Loss")
     axs[0].grid(True)
-    axs[0].set_ylim(0, 2)
+    #axs[0].set_ylim(0, 2)
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
     axs[1].plot(epochs, stats["t_known_mse"], 
                 label="Train MSE Known Entries", color='tab:blue')

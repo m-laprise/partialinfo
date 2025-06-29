@@ -84,7 +84,6 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--theta', type=float, default=0.95, help='Weight for the known entry loss vs penalty')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
-    #parser.add_argument('--eval_agents', action='store_true', help='Always evaluate agent contributions')
     parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     parser.add_argument('--train_n', type=int, default=1000, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
@@ -242,8 +241,4 @@ if __name__ == '__main__':
 
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
-
-    # Agent contribution eval (optional)
-    #if test_unknown < 0.1 or args.eval_agents:
-    #    evaluate_agent_contributions(model, test_loader, criterion, args.n, args.m)
     

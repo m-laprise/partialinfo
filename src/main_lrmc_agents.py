@@ -55,6 +55,7 @@ per agent along with prediction quality.
 
 import argparse
 import gc
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -158,6 +159,9 @@ if __name__ == '__main__':
         recon = aggregator(out)
         print("Initial output variance:", recon.var().item())
 
+    # print time at beginning of training
+    start = datetime.now()
+    print(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
             model, aggregator, train_loader, optimizer, args.theta, criterion, 
@@ -183,6 +187,10 @@ if __name__ == '__main__':
         stats["val_nuclear_norm"].append(nuc)
         stats["val_variance"].append(var)
         stats["val_spectral_gap"].append(gap)
+        
+        if epoch == 1:
+            t1 = datetime.now()
+            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
         
         if epoch % 50 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. L: {train_loss:.4f} | Kn: {t_known:.4f} | "+
@@ -213,7 +221,11 @@ if __name__ == '__main__':
         #    if patience_counter >= args.patience:
         #        print(f"Early stopping at epoch {epoch}.")
         #        break
-
+        
+    end = datetime.now()
+    print(f"End time: {end.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Training time: {(end - start).total_seconds() / 60} minutes.")
+    
     # Clear memory (avoid OOM) and load best model
     optimizer.zero_grad(set_to_none=True)
     gc.collect()

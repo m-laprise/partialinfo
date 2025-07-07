@@ -12,9 +12,12 @@ dependencies = [
     "pytest-cov>=6.2.1",
     "scipy>=1.13.1",
     "tensorboard>=2.19.0",
-    "torch>=2.8.0.dev20250610",
+    "torch>=2.7.1",
     "torch-geometric>=2.6.1",
 ]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu128"
 
 [[tool.uv.index]]
 url = "https://download.pytorch.org/whl/nightly/cpu"

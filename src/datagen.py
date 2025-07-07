@@ -97,15 +97,22 @@ def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
-    def __init__(self, num_matrices, n=20, m=20, r=4, 
-                 num_agents=30, agentdistrib='uniform',
-                 density=0.2, sigma=0.0, verbose=True):
+    def __init__(self, 
+                 num_matrices:int, 
+                 n:int=20, m:int=20, r:int=4, 
+                 num_agents:int=30, 
+                 agentdistrib:str='uniform',
+                 density:float=0.2, 
+                 sigma:float=0.0, 
+                 verbose:bool=True):
         self.num_matrices = num_matrices
         self.n, self.m, self.r = n, m, r
         self.input_dim = self.total_entries = n * m
         self.density = density
         self.sigma = sigma
         self.num_agents = num_agents
+        self.constant_global_known_idx = None
+        self.constant_global_mask = None
         self.agentdistrib = agentdistrib
         self.verbose = verbose
         super().__init__('.')
@@ -131,8 +138,10 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             stats["nuclear_norms"].append(torch.linalg.norm(M, ord='nuc').item())
             stats["gaps"].append(S[self.r - 1] - S[self.r])
             stats["variances"].append(M_vec.var().item())
+            
+            global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
+            known_idx = []
 
-            #global_mask, known_idx = sample_known_entries(self.n, self.m, self.density)
             max_attempts = 10
             for attempt in range(1, max_attempts + 1):
                 global_mask, known_idx = sample_global_known_entries(self.n, self.m, self.density)

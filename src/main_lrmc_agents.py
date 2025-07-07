@@ -59,6 +59,7 @@ from datetime import datetime
 
 import torch
 import torch.nn as nn
+from torch.amp.grad_scaler import GradScaler
 from torch_geometric.loader import DataLoader
 
 from datagen import AgentMatrixReconstructionDataset
@@ -86,15 +87,15 @@ if __name__ == '__main__':
     parser.add_argument('--theta', type=float, default=0.95, help='Weight for the known entry loss vs penalty')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
-    parser.add_argument('--train_n', type=int, default=1000, help='Number of training matrices')
+    parser.add_argument('--train_n', type=int, default=500, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=64, help='Number of test matrices')
     
     args = parser.parse_args()
 
-    device = torch.device('cuda' if torch.cuda.is_available() 
-                          #else 'mps' if torch.backends.mps.is_available() 
-                          else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
     train_set = AgentMatrixReconstructionDataset(
         num_matrices=args.train_n, n=args.n, m=args.m, r=args.r, 
         num_agents=args.num_agents, agentdistrib=args.agentdistrib,
@@ -105,9 +106,14 @@ if __name__ == '__main__':
         num_agents=args.num_agents, agentdistrib=args.agentdistrib,
         density=args.density, sigma=args.sigma, verbose=False
     )
-
-    train_loader = DataLoader(train_set, batch_size=args.batch_size)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size)
+    train_loader = DataLoader(
+        train_set, batch_size=args.batch_size, shuffle=True,
+        pin_memory=torch.cuda.is_available(), 
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=args.batch_size, 
+        pin_memory=torch.cuda.is_available()
+    )
 
     model = DistributedDotGAT(
         input_dim=train_set.input_dim,
@@ -127,10 +133,12 @@ if __name__ == '__main__':
     ).to(device)
     aggregator.apply(init_weights)
     count_parameters(aggregator)
+    print("--------------------------")
     
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
+    scaler = GradScaler(device=device.type) if torch.cuda.is_available() else None
     criterion = nn.MSELoss()
     
     stats = {
@@ -154,7 +162,7 @@ if __name__ == '__main__':
     
     with torch.no_grad():
         batch = next(iter(train_loader))
-        x = batch.x.view(batch.num_graphs, model.num_agents, -1).to(device)
+        x = batch.x.view(batch.num_graphs, model.num_agents, -1).to(device, non_blocking=True)
         out = model(x)
         recon = aggregator(out)
         print("Initial output variance:", recon.var().item())
@@ -165,11 +173,12 @@ if __name__ == '__main__':
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
             model, aggregator, train_loader, optimizer, args.theta, criterion, 
-            args.n, args.m, args.r, device
+            args.n, args.m, args.r, device, scaler
         )
+        val_batches = len(val_loader)
         t_known, t_unknown, t_nuc, t_var, t_gap = evaluate(
             model, aggregator, train_loader, criterion, 
-            args.n, args.m, args.r, device, tag="train"
+            args.n, args.m, args.r, device, tag="train", max_batches=val_batches
         )
         val_known, val_unknown, nuc, var, gap = evaluate(
             model, aggregator, val_loader, criterion, 

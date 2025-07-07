@@ -105,7 +105,7 @@ if __name__ == '__main__':
     # Warmup
     train_loss = train(
         model, aggregator, train_loader, optimizer, args.theta, criterion, 
-        args.n, args.m, args.r, device
+        args.n, args.m, args.r, device, None
     )
     t_known, t_unknown, t_nuc, t_var, t_gap = evaluate(
         model, aggregator, train_loader, criterion, 
@@ -117,7 +117,7 @@ if __name__ == '__main__':
         with record_function("model_training"):
             train_loss = train(
                 model, aggregator, train_loader, optimizer, args.theta, criterion, 
-                args.n, args.m, args.r, device
+                args.n, args.m, args.r, device, None
             )
             t_known, t_unknown, t_nuc, t_var, t_gap = evaluate(
                 model, aggregator, train_loader, criterion, 

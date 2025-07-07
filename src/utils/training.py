@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.amp.autocast_mode import autocast
 
 
 def init_weights(m):
@@ -17,6 +18,9 @@ def spectral_penalty_batched(prediction, rank, evalmode=False, eps=1e-6, gamma=1
     Returns: scalar tensor loss or list of eval gaps
     """
     try:
+        # Note about CUDA:
+        # Default is Jacobi (driver = 'gesvdj'); Divide‑and‑Conquer (driver = 'gesvda') also 
+        # possible for tall or thin matrices
         S = torch.linalg.svdvals(prediction)  # shape: [batch_size, min(n, m)]
     except RuntimeError:
         return torch.tensor(0.0, device=prediction.device)
@@ -40,37 +44,43 @@ def spectral_penalty_batched(prediction, rank, evalmode=False, eps=1e-6, gamma=1
     return penalty.mean()  # return mean over batch
 
 
-def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank, 
-          device):
+def train(model, aggregator, loader, optimizer, theta, criterion, 
+          n, m, rank, 
+          device, scaler):
     model.train()
     total_loss = 0
     for batch in loader:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         batch_size = batch.num_graphs
 
         # Inputs to the model (agent views)
-        x = batch.x.view(batch_size, model.num_agents, -1)
-        x = x.to(device)
-        out = model(x)
+        x = batch.x.view(batch_size, model.num_agents, -1).to(device, non_blocking=torch.cuda.is_available())
+        target = batch.y.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, n * m]
+        mask = batch.mask.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, n * m]
+        
+        # Conditionally use autocast if on GPU
+        if torch.cuda.is_available() and scaler is not None:
+            with autocast(device_type="cuda"):
+                out = model(x)
+                prediction = aggregator(out) # shape: [batch_size, n * m]
+                reconstruction = criterion(prediction[mask], target[mask])
+                penalty = spectral_penalty_batched(prediction.view(batch_size, n, m), rank)
+                loss = theta * reconstruction + (1 - theta) * penalty
 
-        # Aggregated matrix prediction
-        prediction = aggregator(out)  # shape: [batch_size, n * m]
-        target = batch.y.view(batch_size, -1).to(device)  # shape: [batch_size, n * m]
-        mask = batch.mask.view(batch_size, -1).to(device)  # shape: [batch_size, n * m]
-
-        # Compute masked reconstruction loss (only known entries)
-        reconstructionloss = criterion(prediction[mask], target[mask])
-
-        # Spectral penalty applied to full matrix prediction
-        penalty = spectral_penalty_batched(prediction.view(batch_size, n, m), rank)
-
-        # Combined loss
-        loss = theta * reconstructionloss + (1 - theta) * penalty
-        loss.backward()
-
-        # Gradient clipping and update
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            out = model(x)
+            prediction = aggregator(out) # shape: [batch_size, n * m]
+            reconstruction = criterion(prediction[mask], target[mask])
+            penalty = spectral_penalty_batched(prediction.view(batch_size, n, m), rank)
+            loss = theta * reconstruction + (1 - theta) * penalty
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         # Apply structural constraints (e.g., freeze connectivity)
         model.freeze_nonlearnable()
@@ -83,19 +93,22 @@ def train(model, aggregator, loader, optimizer, theta, criterion, n, m, rank,
 @torch.no_grad()
 def evaluate(
     model, aggregator, loader, criterion, n, m, rank, device, 
-    tag: str = "eval"
+    tag: str = "eval", max_batches=None
 ):
     model.eval()
     known_mse, unknown_mse, nuclear_norms, variances, gaps = [], [], [], [], []
 
-    for batch in loader:
+    for i, batch in enumerate(loader):
+        if max_batches is not None and i >= max_batches:
+            break
+        
         batch_size = batch.num_graphs
 
-        x = batch.x.view(batch_size, model.num_agents, -1).to(device)
+        x = batch.x.view(batch_size, model.num_agents, -1).to(device, non_blocking=torch.cuda.is_available())
         out = model(x)
         prediction = aggregator(out)  # [B, nm]
-        target = batch.y.view(batch_size, -1).to(device)
-        mask = batch.mask.view(batch_size, -1).to(device)
+        target = batch.y.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())
+        mask = batch.mask.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())
 
         known_mask = mask
         unknown_mask = ~mask

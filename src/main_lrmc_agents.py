@@ -18,6 +18,9 @@ Explicit message passing rounds are controlled by message_steps in DistributedDo
 updates applied iteratively through GAT heads.
 
 Design choices:
+- Agents do not specialize. There are no agent-specific embeddings or parameters.
+    Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
+    additional diversity or specialization losses.
 - *Positional embeddings*: None in this version. Many
 alternatives are possible, including integrating structural rather than only coordinate information.
 - *Adjacency matrix is not input-dependent*: 
@@ -33,9 +36,6 @@ The rest are frozen at zero through gradient masking.
     neighbors), which is also static.
     - Other alternatives would be dynamic thresholding or learned gating. ChatGPT suggests thresholded softmax 
     (Sparsemax or Entmax), attention dropout, learned attention masks, or entropic sparsity.
-- Agents do not specialize. There are no agent-specific embeddings or parameters.
-    Alternatives include: agent-specific MLPs or gating mechanisms before/after message passing;  
-    additional diversity or specialization losses.
 - No residual connections.
     Alternative: `h = h + torch.stack(head_outputs).mean(dim=0)` or `h = self.norm(h + ...)`
 - Collective aggregation occurs through learned, gated (input-dependent) pooling across agents.
@@ -45,8 +45,7 @@ The rest are frozen at zero through gradient masking.
 
 Required improvements:
 - Save and plot connectivity matrix over time
-- Spectral penalty is unstable. ChatGPT suggests replacing with nuclear norm clipping, 
-differentiable low-rank approximations, or penalizing condition number.
+- Spectral penalty is unstable. Explore: penalizing condition number.
 - Log agent_diversity_penalty during training to track changes in agent roles
 - Per-agent MSE should be correlated with agent input quality/sparsity. Integrate tracking input sparsity 
 per agent along with prediction quality.

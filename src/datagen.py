@@ -4,7 +4,7 @@ import torch
 from torch_geometric.data import Data, InMemoryDataset
 
 
-def generate_low_rank_matrix(n, m, r, sigma=0.0):
+def generate_low_rank_matrix(n: int, m: int, r: int, sigma=0.0):
     """
     Returns: matrix M of shape [n, m] = U @ V.T + noise
     """
@@ -17,46 +17,54 @@ def generate_low_rank_matrix(n, m, r, sigma=0.0):
     return torch.tensor(M, dtype=torch.float32)
 
 
-def sample_known_entries(n, m, density):
+def sample_global_known_entries(n:int, m:int, density:float):
     total_entries = n * m
-    known_count = max(int(density * total_entries), 1)
+    global_known_count = max(int(density * total_entries), 1)
     all_indices = torch.randperm(total_entries)
-    known_indices = all_indices[:known_count]
-    mask = torch.zeros(total_entries, dtype=torch.bool)
-    mask[known_indices] = True
-    return mask, known_indices
+    global_known_indices = all_indices[:global_known_count]
+    global_mask = torch.zeros(total_entries, dtype=torch.bool)
+    global_mask[global_known_indices] = True
+    return global_mask, global_known_indices
 
 
-def build_agent_views(num_agents, known_indices, observed, 
+def define_agent_samplesize(num_agents:int, num_global_known:int) -> tuple[int, int]:
+    oversampled = 0
+    base = max(1, num_global_known // num_agents)
+    low = min(int(2.0 * base), num_global_known)
+    high = min(int(4.0 * base), num_global_known)
+    if high <= low:
+        samplesize = low
+    else:
+        samplesize = np.random.randint(low, high)
+    if samplesize > num_global_known:
+        oversampled = 1
+    samplesize = min(samplesize, num_global_known)
+    return samplesize, oversampled
+
+
+def build_agent_views(num_agents, global_known_idx, observed, 
                       total_entries, mode='uniform'):
     views = []
     agent_endowments = []
     oversampled = 0
+    num_global_known = len(global_known_idx)
 
     for _ in range(num_agents):
         view = torch.zeros(total_entries, dtype=torch.float32)
 
         if mode == 'all-see-all':
-            view[known_indices] = observed[known_indices]
-            endowment = len(known_indices)
+            view[global_known_idx] = observed[global_known_idx]
+            endowment = len(global_known_idx)
 
         elif mode == 'uniform':
-            if len(known_indices) == 0:
+            if len(global_known_idx) == 0:
                 sample_size = 0
                 sample_idx = []
             else:
-                base = max(1, len(known_indices) // num_agents)
-                low = min(int(2.0 * base), len(known_indices))
-                high = min(int(4.0 * base), len(known_indices))
-                if high <= low:
-                    sample_size = low  
-                else:
-                    sample_size = np.random.randint(low, high)
-                if sample_size > len(known_indices):
-                    oversampled += 1
-                sample_size = min(sample_size, len(known_indices))
-                sample_idx = known_indices[
-                    torch.randint(len(known_indices), (sample_size,))
+                sample_size, agent_oversampled = define_agent_samplesize(num_agents, num_global_known)
+                oversampled += agent_oversampled
+                sample_idx = global_known_idx[
+                    torch.randint(num_global_known, (sample_size,))
                 ]
             view = torch.zeros(total_entries, dtype=torch.float32)
             if sample_size > 0:
@@ -94,19 +102,17 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                  density=0.2, sigma=0.0, verbose=True):
         self.num_matrices = num_matrices
         self.n, self.m, self.r = n, m, r
+        self.input_dim = self.total_entries = n * m
         self.density = density
         self.sigma = sigma
         self.num_agents = num_agents
         self.agentdistrib = agentdistrib
         self.verbose = verbose
-        self.input_dim = n * m
         super().__init__('.')
         self.data, self.slices = self._generate()
 
     def _generate(self):
         data_list = []
-        total_entries = self.n * self.m
-
         stats = {
             "nuclear_norms": [],
             "gaps": [],
@@ -129,7 +135,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             #global_mask, known_idx = sample_known_entries(self.n, self.m, self.density)
             max_attempts = 10
             for attempt in range(1, max_attempts + 1):
-                global_mask, known_idx = sample_known_entries(self.n, self.m, self.density)
+                global_mask, known_idx = sample_global_known_entries(self.n, self.m, self.density)
                 mask_2d = global_mask.view(self.n, self.m)
                 rows_ok = (mask_2d.sum(dim=1) >= self.r).all()
                 cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
@@ -149,11 +155,11 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
 
             if self.num_agents == 1 or self.agentdistrib == 'all-see-all':
                 agent_views, endowments, _ = build_agent_views(
-                    self.num_agents, known_idx, observed, total_entries, mode='all-see-all'
+                    self.num_agents, known_idx, observed, self.total_entries, mode='all-see-all'
                 )
             else:
                 agent_views, endowments, oversampled = build_agent_views(
-                    self.num_agents, known_idx, observed, total_entries, mode='uniform'
+                    self.num_agents, known_idx, observed, self.total_entries, mode='uniform'
                 )
                 if oversampled > 0:
                     stats["oversample_flags"] += 1
@@ -181,16 +187,16 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.actual_known_mean = np.mean(stats["actual_knowns"])
 
         if self.verbose:
-            self._print_summary(total_entries, stats["oversample_flags"])
+            self._print_summary(stats["oversample_flags"])
 
         return self.collate(data_list)
 
-    def _print_summary(self, total_entries, oversampled):
+    def _print_summary(self, oversampled):
         print("--------------------------")
         print(f"Generated {self.num_matrices} rank-{self.r} matrices of size {self.n}x{self.m}")
         print(f"Mean nuclear norm: {self.nuclear_norm_mean:.4f}, Spectral gap: {self.gap_mean:.4f}")
         print(f"Observed density: {self.density:.2f}, Noise level: {self.sigma:.4f}")
-        print(f"Total entries: {total_entries}, Target known entries: {total_entries * self.density:.1f}, Mean known entries: {self.actual_known_mean:.1f}")
+        print(f"Total entries: {self.total_entries}, Target known entries: {self.total_entries * self.density:.1f}, Mean known entries: {self.actual_known_mean:.1f}")
         print(f"{self.num_agents} agents, Avg overlap: {self.agent_overlap_mean:.3f}")
         print(f"Avg entries per agent: {self.agent_endowment_mean:.1f}")
         if oversampled > 0:

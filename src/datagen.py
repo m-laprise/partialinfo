@@ -27,6 +27,32 @@ def sample_global_known_entries(n:int, m:int, density:float):
     return global_mask, global_known_indices
 
 
+def robust_sample_global_known_entries(
+    n: int, m: int, r: int, density: float, 
+    total_entries: int,
+    idx: int, max_attempts: int = 10,
+    verbose: bool = True
+):
+    global_mask = torch.zeros(total_entries, dtype=torch.bool)
+    known_idx = []
+    for attempt in range(1, max_attempts + 1):
+        global_mask, known_idx = sample_global_known_entries(n, m, density)
+        mask_2d = global_mask.view(n, m)
+        rows_ok = (mask_2d.sum(dim=1) >= r).all()
+        cols_ok = (mask_2d.sum(dim=0) >= r).all()
+        if rows_ok and cols_ok:
+            break
+        if attempt == max_attempts:
+            raise RuntimeError(
+                f"Failed to sample a valid mask after {max_attempts} attempts. "
+                f"Could not ensure at least {r} known entries in each row and column. "
+                f"Matrix index: {idx}, density: {density}, size: {n}x{m}"
+            )
+        if verbose:
+            print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
+    return global_mask, known_idx
+
+
 def define_agent_samplesize(num_agents:int, num_global_known:int) -> tuple[int, int]:
     oversampled = 0
     base = max(1, num_global_known // num_agents)
@@ -113,6 +139,8 @@ def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
+    _mask_cache = {}
+    
     def __init__(self, 
                  num_matrices: int, 
                  n: int = 20, m: int = 20, r: int = 4, 
@@ -120,7 +148,8 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                  agentdistrib: str = 'uniform',
                  density: float = 0.2, 
                  sigma: float = 0.0, 
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 mask_cache = None):
         self.num_matrices = num_matrices
         self.n, self.m, self.r = n, m, r
         self.input_dim = self.total_entries = n * m
@@ -129,6 +158,8 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.num_agents = num_agents
         self.agentdistrib = agentdistrib
         self.verbose = verbose
+        if mask_cache is not None:
+            self._mask_cache = mask_cache  # use external cache (shared across datasets)
         super().__init__('.')
         self.data, self.slices = self._generate()
 
@@ -160,54 +191,32 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             
             # Step 2: Build tensor mask
             # 2A: matrix-level knowable entries
-            global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
-            known_idx = []
+            global_mask, global_known_idx = robust_sample_global_known_entries(
+                self.n, self.m, self.r, self.density, self.total_entries, idx
+            )
+            # global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
+            # known_idx = []
 
-            max_attempts = 10
-            for attempt in range(1, max_attempts + 1):
-                global_mask, known_idx = sample_global_known_entries(self.n, self.m, self.density)
-                mask_2d = global_mask.view(self.n, self.m)
-                rows_ok = (mask_2d.sum(dim=1) >= self.r).all()
-                cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
-                if rows_ok and cols_ok:
-                    break
-                if attempt == max_attempts:
-                    raise RuntimeError(
-                        f"Failed to sample a valid mask after {max_attempts} attempts. "
-                        f"Could not ensure at least {self.r} known entries in each row and column. "
-                        f"Matrix index: {idx}, density: {self.density}, size: {self.n}x{self.m}"
-                    )
-                if self.verbose:
-                    print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
-            
-            #observed = M_vec.clone()
-            #observed[~global_mask] = 0.0
+            # max_attempts = 10
+            # for attempt in range(1, max_attempts + 1):
+            #     global_mask, known_idx = sample_global_known_entries(self.n, self.m, self.density)
+            #     mask_2d = global_mask.view(self.n, self.m)
+            #     rows_ok = (mask_2d.sum(dim=1) >= self.r).all()
+            #     cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
+            #     if rows_ok and cols_ok:
+            #         break
+            #     if attempt == max_attempts:
+            #         raise RuntimeError(
+            #             f"Failed to sample a valid mask after {max_attempts} attempts. "
+            #             f"Could not ensure at least {self.r} known entries in each row and column. "
+            #             f"Matrix index: {idx}, density: {self.density}, size: {self.n}x{self.m}"
+            #         )
+            #     if self.verbose:
+            #         print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
+
             matrices.append(M_vec)
             global_masks.append(global_mask)
-            global_known_indices_list.append(known_idx)
-
-            # if self.num_agents == 1 or self.agentdistrib == 'all-see-all':
-            #     agent_views, endowments, _ = build_agent_views(
-            #         self.num_agents, known_idx, observed, self.total_entries, mode='all-see-all'
-            #     )
-            # else:
-            #     agent_views, endowments, oversampled = build_agent_views(
-            #         self.num_agents, known_idx, observed, self.total_entries, mode='uniform'
-            #     )
-            #     if oversampled > 0:
-            #         stats["oversample_flags"] += 1
-                    
-            # assert all(e <= len(known_idx) for e in endowments), "Agent oversampling cap failed."
-            # mask_tensor = (agent_views != 0).any(dim=0)
-            # stats["actual_knowns"].append(mask_tensor.sum().item())
-            # stats["agent_endowments"].extend(endowments)
-
-            # if self.num_agents > 1:
-            #     avg_overlap = compute_avg_agent_overlap(agent_views)
-            #     stats["agent_overlaps"].append(avg_overlap)
-
-            # data = Data(x=agent_views, y=M_vec, mask=mask_tensor)
-            # data_list.append(data)
+            global_known_indices_list.append(global_known_idx)
             
         # 2b: Agent-level masks
         agent_masks, agent_endowments, oversampled = build_agent_masks(
@@ -223,7 +232,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             for j in range(self.num_agents):
                 mask = agent_masks[i, j]
                 agent_view[j][mask] = M_vec[mask]
-
+            #----------------------#
             mask_tensor = (agent_view != 0).any(dim=0)
             stats["actual_knowns"].append(mask_tensor.sum().item())
             stats["agent_endowments"].extend(agent_endowments[i])
@@ -262,3 +271,6 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             print(f"WARNING ⚠️  {oversampled} matrices had agents sampling all known entries.")
         print("--------------------------")
 
+    def get_mask_cache(self):
+        """Return internal cache for external reuse."""
+        return self._mask_cache

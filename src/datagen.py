@@ -42,41 +42,57 @@ def define_agent_samplesize(num_agents:int, num_global_known:int) -> tuple[int, 
     return samplesize, oversampled
 
 
-def build_agent_views(num_agents, global_known_idx, observed, 
-                      total_entries, mode='uniform'):
-    views = []
-    agent_endowments = []
-    oversampled = 0
-    num_global_known = len(global_known_idx)
+def build_agent_masks(num_matrices: int,
+                      num_agents: int,
+                      total_entries: int,
+                      global_known_indices_list: list[torch.Tensor],
+                      mode='uniform') -> tuple[torch.Tensor, list[list[int]], int]:
+    """
+    Returns:
+        - mask_tensor: shape [num_matrices, num_agents, total_entries]
+        - agent_endowments: list of list of ints [num_matrices][num_agents]
+        - oversampled: total oversampled flags
+    """
+    assert num_matrices == len(global_known_indices_list)
+    masks = []
+    endowments_all = []
+    oversampled_total = 0
 
-    for _ in range(num_agents):
-        view = torch.zeros(total_entries, dtype=torch.float32)
+    for global_known_idx in global_known_indices_list:
+        matrix_masks = []
+        matrix_endowments = []
+        num_global_known = len(global_known_idx)
 
-        if mode == 'all-see-all':
-            view[global_known_idx] = observed[global_known_idx]
-            endowment = len(global_known_idx)
+        for _ in range(num_agents):
+            mask = torch.zeros(total_entries, dtype=torch.bool)
 
-        elif mode == 'uniform':
-            if len(global_known_idx) == 0:
-                sample_size = 0
-                sample_idx = []
+            if mode == 'all-see-all':
+                mask[global_known_idx] = True
+                endowment = len(global_known_idx)
+
+            elif mode == 'uniform':
+                if len(global_known_idx) == 0:
+                    sample_size = 0
+                    sample_idx = []
+                else:
+                    sample_size, agent_oversampled = define_agent_samplesize(num_agents, num_global_known)
+                    oversampled_total += agent_oversampled
+                    sample_idx = global_known_idx[
+                        torch.randint(num_global_known, (sample_size,))
+                    ]
+                if sample_size > 0:
+                    mask[sample_idx] = True
+                endowment = sample_size
             else:
-                sample_size, agent_oversampled = define_agent_samplesize(num_agents, num_global_known)
-                oversampled += agent_oversampled
-                sample_idx = global_known_idx[
-                    torch.randint(num_global_known, (sample_size,))
-                ]
-            view = torch.zeros(total_entries, dtype=torch.float32)
-            if sample_size > 0:
-                view[sample_idx] = observed[sample_idx]
-            endowment = sample_size
-        else:
-            raise NotImplementedError(f"Unknown mode: {mode}")
+                raise NotImplementedError(f"Unknown mode: {mode}")
 
-        views.append(view)
-        agent_endowments.append(endowment)
+            matrix_masks.append(mask)
+            matrix_endowments.append(endowment)
 
-    return torch.stack(views), agent_endowments, oversampled
+        masks.append(torch.stack(matrix_masks))  # [num_agents, total_entries]
+        endowments_all.append(matrix_endowments)
+
+    return torch.stack(masks), endowments_all, oversampled_total  # [num_matrices, num_agents, total_entries]
 
 
 def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
@@ -98,21 +114,19 @@ def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
     def __init__(self, 
-                 num_matrices:int, 
-                 n:int=20, m:int=20, r:int=4, 
-                 num_agents:int=30, 
-                 agentdistrib:str='uniform',
-                 density:float=0.2, 
-                 sigma:float=0.0, 
-                 verbose:bool=True):
+                 num_matrices: int, 
+                 n: int = 20, m: int = 20, r: int = 4, 
+                 num_agents: int = 30, 
+                 agentdistrib: str = 'uniform',
+                 density: float = 0.2, 
+                 sigma: float = 0.0, 
+                 verbose: bool = True):
         self.num_matrices = num_matrices
         self.n, self.m, self.r = n, m, r
         self.input_dim = self.total_entries = n * m
         self.density = density
         self.sigma = sigma
         self.num_agents = num_agents
-        self.constant_global_known_idx = None
-        self.constant_global_mask = None
         self.agentdistrib = agentdistrib
         self.verbose = verbose
         super().__init__('.')
@@ -120,6 +134,10 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
 
     def _generate(self):
         data_list = []
+        matrices = []
+        global_masks = []
+        global_known_indices_list = []
+        
         stats = {
             "nuclear_norms": [],
             "gaps": [],
@@ -131,6 +149,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         }
 
         for idx in range(self.num_matrices):
+            # Step 1: generate low rank matrices
             M = generate_low_rank_matrix(self.n, self.m, self.r, self.sigma)
             M_vec = M.view(-1)
             S = torch.linalg.svdvals(M)
@@ -139,6 +158,8 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             stats["gaps"].append(S[self.r - 1] - S[self.r])
             stats["variances"].append(M_vec.var().item())
             
+            # Step 2: Build tensor mask
+            # 2A: matrix-level knowable entries
             global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
             known_idx = []
 
@@ -159,30 +180,59 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
                 if self.verbose:
                     print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
             
-            observed = M_vec.clone()
-            observed[~global_mask] = 0.0
+            #observed = M_vec.clone()
+            #observed[~global_mask] = 0.0
+            matrices.append(M_vec)
+            global_masks.append(global_mask)
+            global_known_indices_list.append(known_idx)
 
-            if self.num_agents == 1 or self.agentdistrib == 'all-see-all':
-                agent_views, endowments, _ = build_agent_views(
-                    self.num_agents, known_idx, observed, self.total_entries, mode='all-see-all'
-                )
-            else:
-                agent_views, endowments, oversampled = build_agent_views(
-                    self.num_agents, known_idx, observed, self.total_entries, mode='uniform'
-                )
-                if oversampled > 0:
-                    stats["oversample_flags"] += 1
+            # if self.num_agents == 1 or self.agentdistrib == 'all-see-all':
+            #     agent_views, endowments, _ = build_agent_views(
+            #         self.num_agents, known_idx, observed, self.total_entries, mode='all-see-all'
+            #     )
+            # else:
+            #     agent_views, endowments, oversampled = build_agent_views(
+            #         self.num_agents, known_idx, observed, self.total_entries, mode='uniform'
+            #     )
+            #     if oversampled > 0:
+            #         stats["oversample_flags"] += 1
                     
-            assert all(e <= len(known_idx) for e in endowments), "Agent oversampling cap failed."
-            mask_tensor = (agent_views != 0).any(dim=0)
+            # assert all(e <= len(known_idx) for e in endowments), "Agent oversampling cap failed."
+            # mask_tensor = (agent_views != 0).any(dim=0)
+            # stats["actual_knowns"].append(mask_tensor.sum().item())
+            # stats["agent_endowments"].extend(endowments)
+
+            # if self.num_agents > 1:
+            #     avg_overlap = compute_avg_agent_overlap(agent_views)
+            #     stats["agent_overlaps"].append(avg_overlap)
+
+            # data = Data(x=agent_views, y=M_vec, mask=mask_tensor)
+            # data_list.append(data)
+            
+        # 2b: Agent-level masks
+        agent_masks, agent_endowments, oversampled = build_agent_masks(
+            self.num_matrices, self.num_agents, self.total_entries,
+            global_known_indices_list, mode=self.agentdistrib
+        )
+        stats["oversample_flags"] = oversampled
+        
+        # Step 3: Apply masks to create final data objects
+        for i in range(self.num_matrices):
+            M_vec = matrices[i]
+            agent_view = torch.zeros((self.num_agents, self.total_entries), dtype=torch.float32)
+            for j in range(self.num_agents):
+                mask = agent_masks[i, j]
+                agent_view[j][mask] = M_vec[mask]
+
+            mask_tensor = (agent_view != 0).any(dim=0)
             stats["actual_knowns"].append(mask_tensor.sum().item())
-            stats["agent_endowments"].extend(endowments)
+            stats["agent_endowments"].extend(agent_endowments[i])
 
             if self.num_agents > 1:
-                avg_overlap = compute_avg_agent_overlap(agent_views)
+                avg_overlap = compute_avg_agent_overlap(agent_view)
                 stats["agent_overlaps"].append(avg_overlap)
 
-            data = Data(x=agent_views, y=M_vec, mask=mask_tensor)
+            data = Data(x=agent_view, y=M_vec, mask=mask_tensor)
             data_list.append(data)
 
         # Save summary statistics

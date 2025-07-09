@@ -69,14 +69,14 @@ from utils.training import evaluate, init_weights, train
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n', type=int, default=30)
-    parser.add_argument('--m', type=int, default=30)
+    parser.add_argument('--n', type=int, default=32)
+    parser.add_argument('--m', type=int, default=32)
     parser.add_argument('--r', type=int, default=2)
-    parser.add_argument('--density', type=float, default=0.3)
+    parser.add_argument('--density', type=float, default=0.5)
     parser.add_argument('--sigma', type=float, default=0.0)
     parser.add_argument('--num_agents', type=int, default=30)
-    parser.add_argument('--agentdistrib', type=str, default='all-see-all')
-    parser.add_argument('--sampling_scheme', type=str, default='constant', choices=['constant', 'random'])
+    parser.add_argument('--agentdistrib', type=str, default='uniform', choices=['all-see-all', 'uniform'])
+    parser.add_argument('--sampling_scheme', type=str, default='random', choices=['constant', 'random'])
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_heads', type=int, default=2)
     parser.add_argument('--adjacency_mode', type=str, default='none', choices=['none', 'learned'])
@@ -98,17 +98,17 @@ if __name__ == '__main__':
     
     train_set = AgentMatrixReconstructionDataset(
         num_matrices=args.train_n, n=args.n, m=args.m, r=args.r, 
-        num_agents=args.num_agents, agentdistrib=args.agentdistrib,
+        num_agents=args.num_agents, agentdistrib=args.agentdistrib, sampling_scheme=args.sampling_scheme,
         density=args.density, sigma=args.sigma
     )
     shared_cache = None
     if args.sampling_scheme == 'constant':
-        shared_cache = train_set.get_mask_cache()
+        shared_cache = train_set.get_masks_cache()
         
     val_set = AgentMatrixReconstructionDataset(
         num_matrices=args.val_n, n=args.n, m=args.m, r=args.r, 
-        num_agents=args.num_agents, agentdistrib=args.agentdistrib,
-        density=args.density, sigma=args.sigma, verbose=False, mask_cache=shared_cache
+        num_agents=args.num_agents, agentdistrib=args.agentdistrib, sampling_scheme=args.sampling_scheme,
+        density=args.density, sigma=args.sigma, verbose=False, masks_cache=shared_cache
     )
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True,
@@ -253,8 +253,8 @@ if __name__ == '__main__':
     # Final test evaluation on fresh data
     test_dataset = AgentMatrixReconstructionDataset(
         num_matrices=args.test_n, n=args.n, m=args.m, r=args.r, 
-        num_agents=args.num_agents, agentdistrib=args.agentdistrib,
-        density=args.density, sigma=args.sigma, verbose=False, mask_cache=shared_cache
+        num_agents=args.num_agents, agentdistrib=args.agentdistrib, sampling_scheme=args.sampling_scheme,
+        density=args.density, sigma=args.sigma, verbose=False, masks_cache=shared_cache
     )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     test_known, test_unknown, test_nuc, test_var, test_gap = evaluate(

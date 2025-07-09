@@ -33,37 +33,28 @@ def robust_sample_global_known_entries(
     idx: int, max_attempts: int = 10,
     verbose: bool = True
 ):
-    global_mask = torch.zeros(total_entries, dtype=torch.bool)
-    known_idx = []
     for attempt in range(1, max_attempts + 1):
-        global_mask, known_idx = sample_global_known_entries(n, m, density)
+        global_mask, global_known_idx = sample_global_known_entries(n, m, density)
         mask_2d = global_mask.view(n, m)
         rows_ok = (mask_2d.sum(dim=1) >= r).all()
         cols_ok = (mask_2d.sum(dim=0) >= r).all()
         if rows_ok and cols_ok:
-            break
-        if attempt == max_attempts:
-            raise RuntimeError(
-                f"Failed to sample a valid mask after {max_attempts} attempts. "
-                f"Could not ensure at least {r} known entries in each row and column. "
-                f"Matrix index: {idx}, density: {density}, size: {n}x{m}"
-            )
-        if verbose:
+            return global_known_idx
+        if verbose and attempt < max_attempts:
             print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
-    return global_mask, known_idx
+    raise RuntimeError(
+        f"Failed to sample a valid mask after {max_attempts} attempts. "
+        f"Could not ensure at least {r} known entries in each row and column. "
+        f"Matrix index: {idx}, density: {density}, size: {n}x{m}"
+    )
 
 
-def define_agent_samplesize(num_agents:int, num_global_known:int) -> tuple[int, int]:
-    oversampled = 0
+def define_agent_samplesize(num_agents:int, num_global_known:int):
     base = max(1, num_global_known // num_agents)
     low = min(int(2.0 * base), num_global_known)
     high = min(int(4.0 * base), num_global_known)
-    if high <= low:
-        samplesize = low
-    else:
-        samplesize = np.random.randint(low, high)
-    if samplesize > num_global_known:
-        oversampled = 1
+    samplesize = np.random.randint(low, high) if high > low else low
+    oversampled = int(samplesize > num_global_known)
     samplesize = min(samplesize, num_global_known)
     return samplesize, oversampled
 
@@ -71,54 +62,71 @@ def define_agent_samplesize(num_agents:int, num_global_known:int) -> tuple[int, 
 def build_agent_masks(num_matrices: int,
                       num_agents: int,
                       total_entries: int,
-                      global_known_indices_list: list[torch.Tensor],
-                      mode='uniform') -> tuple[torch.Tensor, list[list[int]], int]:
+                      global_known_idx_list: list[torch.Tensor],
+                      mode: str = 'uniform', 
+                      scheme: str = 'constant'):
     """
     Returns:
         - mask_tensor: shape [num_matrices, num_agents, total_entries]
         - agent_endowments: list of list of ints [num_matrices][num_agents]
         - oversampled: total oversampled flags
     """
-    assert num_matrices == len(global_known_indices_list)
     masks = []
     endowments_all = []
     oversampled_total = 0
-
-    for global_known_idx in global_known_indices_list:
-        matrix_masks = []
-        matrix_endowments = []
+    
+    if scheme == 'constant':
+        assert len(global_known_idx_list) == 1
+        global_known_idx = global_known_idx_list[0]
         num_global_known = len(global_known_idx)
-
+        agent_masks = []
+        agent_endowments = []
         for _ in range(num_agents):
             mask = torch.zeros(total_entries, dtype=torch.bool)
+            sample_size, agent_oversampled = define_agent_samplesize(num_agents, num_global_known)
+            oversampled_total += agent_oversampled
+            sample_idx = global_known_idx[torch.randint(num_global_known, (sample_size,))]
+            mask[sample_idx] = True
+            agent_masks.append(mask)
+            agent_endowments.append(len(sample_idx))
+        masks = torch.stack(agent_masks)
+        endowments_all = agent_endowments
+        
+    elif scheme == 'random':
+        assert len(global_known_idx_list) == num_matrices
+        for global_known_idx in global_known_idx_list:
+            agentmatrix_masks = []
+            agentmatrix_endowments = []
+            num_global_known = len(global_known_idx)
 
-            if mode == 'all-see-all':
-                mask[global_known_idx] = True
-                endowment = len(global_known_idx)
+            for _ in range(num_agents):
+                mask = torch.zeros(total_entries, dtype=torch.bool)
 
-            elif mode == 'uniform':
-                if len(global_known_idx) == 0:
-                    sample_size = 0
-                    sample_idx = []
+                if mode == 'all-see-all':
+                    sample_idx = global_known_idx
+
+                elif mode == 'uniform':
+                    if num_global_known == 0:
+                        sample_idx = []
+                    else:
+                        sample_size, agent_oversampled = define_agent_samplesize(num_agents, num_global_known)
+                        oversampled_total += agent_oversampled
+                        sample_idx = global_known_idx[torch.randint(num_global_known, (sample_size,))]
+                        
                 else:
-                    sample_size, agent_oversampled = define_agent_samplesize(num_agents, num_global_known)
-                    oversampled_total += agent_oversampled
-                    sample_idx = global_known_idx[
-                        torch.randint(num_global_known, (sample_size,))
-                    ]
-                if sample_size > 0:
-                    mask[sample_idx] = True
-                endowment = sample_size
-            else:
-                raise NotImplementedError(f"Unknown mode: {mode}")
+                    raise NotImplementedError(f"Unknown mode: {mode}")
 
-            matrix_masks.append(mask)
-            matrix_endowments.append(endowment)
+                mask[sample_idx] = True
+                agentmatrix_masks.append(mask)
+                agentmatrix_endowments.append(len(sample_idx))
 
-        masks.append(torch.stack(matrix_masks))  # [num_agents, total_entries]
-        endowments_all.append(matrix_endowments)
-
-    return torch.stack(masks), endowments_all, oversampled_total  # [num_matrices, num_agents, total_entries]
+            masks.append(torch.stack(agentmatrix_masks)) 
+            endowments_all.append(np.mean(agentmatrix_endowments))
+        masks = torch.stack(masks)
+    else:
+        raise NotImplementedError(f"Unknown scheme: {scheme}")
+    
+    return masks, endowments_all, oversampled_total  # [num_matrices, num_agents, total_entries]
 
 
 def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
@@ -139,17 +147,16 @@ def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
 
 
 class AgentMatrixReconstructionDataset(InMemoryDataset):
-    _mask_cache = {}
-    
     def __init__(self, 
                  num_matrices: int, 
                  n: int = 20, m: int = 20, r: int = 4, 
                  num_agents: int = 30, 
                  agentdistrib: str = 'uniform',
+                 sampling_scheme: str = 'constant',
                  density: float = 0.2, 
                  sigma: float = 0.0, 
                  verbose: bool = True,
-                 mask_cache = None):
+                 masks_cache = None):
         self.num_matrices = num_matrices
         self.n, self.m, self.r = n, m, r
         self.input_dim = self.total_entries = n * m
@@ -157,17 +164,15 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.sigma = sigma
         self.num_agents = num_agents
         self.agentdistrib = agentdistrib
+        self.sampling_scheme = sampling_scheme
         self.verbose = verbose
-        if mask_cache is not None:
-            self._mask_cache = mask_cache  # use external cache (shared across datasets)
+        self._masks_cache = masks_cache  # use external cache (shared across datasets)
         super().__init__('.')
         self.data, self.slices = self._generate()
 
     def _generate(self):
         data_list = []
         matrices = []
-        global_masks = []
-        global_known_indices_list = []
         
         stats = {
             "nuclear_norms": [],
@@ -179,69 +184,73 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             "oversample_flags": 0,
         }
 
-        for idx in range(self.num_matrices):
-            # Step 1: generate low rank matrices
+        # Use external cache if available, otherwise build
+        if self._masks_cache is not None:
+            if self.sampling_scheme == "constant":
+                # Safe reuse — all matrices share the same global_known_idx
+                agent_masks = self._masks_cache
+                agent_endowments = (self._masks_cache > 0).sum(-1).tolist()
+                oversampled = 0
+            else:
+                raise ValueError("Mask cache reuse is only supported for 'constant' sampling_scheme")
+        else:
+            # A: matrix-level knowable entries
+            if self.sampling_scheme == 'random':
+                global_known_idx_list = [
+                    robust_sample_global_known_entries(
+                        self.n, self.m, self.r, self.density, self.total_entries, idx
+                    )
+                    for idx in range(self.num_matrices)
+                ]
+            elif self.sampling_scheme == 'constant':
+                global_known_idx = robust_sample_global_known_entries(
+                    self.n, self.m, self.r, self.density, self.total_entries, 0
+                )
+                global_known_idx_list = [global_known_idx]
+            else:
+                raise NotImplementedError(f"Unknown sampling scheme: {self.sampling_scheme}")
+            
+            # B: Agent-level masks
+            agent_masks, agent_endowments, oversampled = build_agent_masks(
+                self.num_matrices, self.num_agents, self.total_entries,
+                global_known_idx_list, mode=self.agentdistrib, scheme=self.sampling_scheme
+            )
+            if self.sampling_scheme == 'constant':
+                self._masks_cache = agent_masks
+            stats["oversample_flags"] = oversampled
+            stats["agent_endowments"] = agent_endowments
+        
+        # Generate low rank matrices
+        for _ in range(self.num_matrices):
             M = generate_low_rank_matrix(self.n, self.m, self.r, self.sigma)
             M_vec = M.view(-1)
-            S = torch.linalg.svdvals(M)
-
-            stats["nuclear_norms"].append(torch.linalg.norm(M, ord='nuc').item())
-            stats["gaps"].append(S[self.r - 1] - S[self.r])
-            stats["variances"].append(M_vec.var().item())
-            
-            # Step 2: Build tensor mask
-            # 2A: matrix-level knowable entries
-            global_mask, global_known_idx = robust_sample_global_known_entries(
-                self.n, self.m, self.r, self.density, self.total_entries, idx
-            )
-            # global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
-            # known_idx = []
-
-            # max_attempts = 10
-            # for attempt in range(1, max_attempts + 1):
-            #     global_mask, known_idx = sample_global_known_entries(self.n, self.m, self.density)
-            #     mask_2d = global_mask.view(self.n, self.m)
-            #     rows_ok = (mask_2d.sum(dim=1) >= self.r).all()
-            #     cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
-            #     if rows_ok and cols_ok:
-            #         break
-            #     if attempt == max_attempts:
-            #         raise RuntimeError(
-            #             f"Failed to sample a valid mask after {max_attempts} attempts. "
-            #             f"Could not ensure at least {self.r} known entries in each row and column. "
-            #             f"Matrix index: {idx}, density: {self.density}, size: {self.n}x{self.m}"
-            #         )
-            #     if self.verbose:
-            #         print(f"Warning: Retrying sampling for matrix {idx} (attempt {attempt}) due to sparse rows/cols.")
-
             matrices.append(M_vec)
-            global_masks.append(global_mask)
-            global_known_indices_list.append(global_known_idx)
             
-        # 2b: Agent-level masks
-        agent_masks, agent_endowments, oversampled = build_agent_masks(
-            self.num_matrices, self.num_agents, self.total_entries,
-            global_known_indices_list, mode=self.agentdistrib
-        )
-        stats["oversample_flags"] = oversampled
+            stats["nuclear_norms"].append(torch.linalg.norm(M, ord='nuc').item())
+            S = torch.linalg.svdvals(M)
+            stats["gaps"].append((S[self.r - 1] - S[self.r]).item())
+            stats["variances"].append(M_vec.var().item())
         
-        # Step 3: Apply masks to create final data objects
+        # Apply masks to create final data objects
         for i in range(self.num_matrices):
-            M_vec = matrices[i]
-            agent_view = torch.zeros((self.num_agents, self.total_entries), dtype=torch.float32)
-            for j in range(self.num_agents):
-                mask = agent_masks[i, j]
-                agent_view[j][mask] = M_vec[mask]
-            #----------------------#
-            mask_tensor = (agent_view != 0).any(dim=0)
-            stats["actual_knowns"].append(mask_tensor.sum().item())
-            stats["agent_endowments"].extend(agent_endowments[i])
-
+            M_stack = matrices[i].repeat(self.num_agents, 1)
+            agent_masks_i = agent_masks[i, :, :] if self.sampling_scheme == 'random' else agent_masks
+            assert M_stack.shape == agent_masks_i.shape
+            # If constant, apply the unique mask. If random, apply the varying masks for each matrix.
+            agent_views = M_stack * agent_masks_i
+            
+            #if self.sampling_scheme == 'random':
+            #    stats["agent_endowments"].extend(agent_endowments[i])
+                
             if self.num_agents > 1:
-                avg_overlap = compute_avg_agent_overlap(agent_view)
+                avg_overlap = compute_avg_agent_overlap(agent_views)
                 stats["agent_overlaps"].append(avg_overlap)
 
-            data = Data(x=agent_view, y=M_vec, mask=mask_tensor)
+            global_actual_known = agent_masks_i.sum(dim = 0) > 0
+            actual_known = global_actual_known.sum()
+            stats["actual_knowns"].append(actual_known)
+            
+            data = Data(x=agent_views, y=matrices[i], mask=global_actual_known)
             data_list.append(data)
 
         # Save summary statistics
@@ -251,7 +260,7 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
         self.agent_overlap_mean = (
             np.mean(stats["agent_overlaps"]) if stats["agent_overlaps"] else -np.inf
         )
-        self.agent_endowment_mean = np.mean(stats["agent_endowments"])
+        self.agent_endowment_mean = np.mean(stats["agent_endowments"]) if stats["agent_endowments"] else -np.inf
         self.actual_known_mean = np.mean(stats["actual_knowns"])
 
         if self.verbose:
@@ -271,6 +280,6 @@ class AgentMatrixReconstructionDataset(InMemoryDataset):
             print(f"WARNING ⚠️  {oversampled} matrices had agents sampling all known entries.")
         print("--------------------------")
 
-    def get_mask_cache(self):
+    def get_masks_cache(self):
         """Return internal cache for external reuse."""
-        return self._mask_cache
+        return self._masks_cache

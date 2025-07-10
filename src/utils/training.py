@@ -12,6 +12,22 @@ def init_weights(m):
             nn.init.zeros_(m.bias)
             
 
+def init_stats():
+    return {
+        "train_loss": [],
+        "t_known_mse": [],
+        "t_unknown_mse": [],
+        "t_nuclear_norm": [],
+        "t_variance": [],
+        "t_spectral_gap": [],
+        "val_known_mse": [],
+        "val_unknown_mse": [],
+        "val_nuclear_norm": [],
+        "val_variance": [],
+        "val_spectral_gap": []
+    }
+    
+
 def spectral_penalty_batched(prediction, rank, evalmode=False, eps=1e-6, gamma=1.0):
     """
     prediction: tensor of shape [batch_size, n, m]

@@ -65,7 +65,7 @@ from datagen import AgentMatrixReconstructionDataset
 from dotGAT import Aggregator, DistributedDotGAT
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_stats
-from utils.training import evaluate, init_weights, train
+from utils.training import evaluate, init_stats, init_weights, train
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -145,19 +145,7 @@ if __name__ == '__main__':
     scaler = GradScaler(device=device.type) if torch.cuda.is_available() else None
     criterion = nn.MSELoss()
     
-    stats = {
-        "train_loss": [],
-        "t_known_mse": [],
-        "t_unknown_mse": [],
-        "t_nuclear_norm": [],
-        "t_variance": [],
-        "t_spectral_gap": [],
-        "val_known_mse": [],
-        "val_unknown_mse": [],
-        "val_nuclear_norm": [],
-        "val_variance": [],
-        "val_spectral_gap": []
-    }
+    stats = init_stats()
     file_base = unique_filename()
     checkpoint_path = f"{file_base}_checkpoint.pt"
     

@@ -10,31 +10,38 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.amp.grad_scaler import GradScaler
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
 from dotGAT import CollectiveClassifier, DistributedDotGAT
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif
+from utils.logging import log_training_run
 from utils.training_temporal import evaluate, init_stats, init_weights, train
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--t', type=int, default=32)
-    parser.add_argument('--m', type=int, default=32)
-    parser.add_argument('--r', type=int, default=2)
-    parser.add_argument('--density', type=float, default=0.5)
-    parser.add_argument('--sigma', type=float, default=0.0)
-    parser.add_argument('--num_agents', type=int, default=30)
-    parser.add_argument('--hidden_dim', type=int, default=128)
-    parser.add_argument('--num_heads', type=int, default=2)
-    parser.add_argument('--adjacency_mode', type=str, default='none', choices=['none', 'learned'])
-    parser.add_argument('--dropout', type=float, default=0.3)
-    parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--patience', type=int, default=200, help='Early stopping patience')
+    # Ground truth and sensing hyperparameters
+    parser.add_argument('--t', type=int, default=32, help='Number of rows in each ground truth matrix')
+    parser.add_argument('--m', type=int, default=32, help='Number of columns in each ground truth matrix')
+    parser.add_argument('--r', type=int, default=2, help='Rank of each ground truth matrix')
+    parser.add_argument('--density', type=float, default=0.5, help='Target proportion of known entries in each ground truth matrix')
+    parser.add_argument('--sigma', type=float, default=0.0, help='Noise level in each ground truth matrix')
+    parser.add_argument('--num_agents', type=int, default=30, help='Number of agents')
+    # Model hyperparameters
+    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension of the model')
+    parser.add_argument('--num_heads', type=int, default=1)
+    # Message passing hyperparameters
+    parser.add_argument('--att_heads', type=int, default=4, help='Number of attention heads in the message passing layers') 
+    parser.add_argument('--adjacency_mode', type=str, default='none', choices=['none', 'learned'], help='Whether adjacency matrix for message-passing is all-to-all or learned')
     parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
+    # Training hyperparameters
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout probability during training')
+    parser.add_argument('--lr', type=float, default=0.001, help='Initial learning rate')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--patience', type=int, default=200, help='Early stopping patience')
     parser.add_argument('--train_n', type=int, default=500, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=64, help='Number of test matrices')
@@ -84,9 +91,11 @@ if __name__ == '__main__':
     count_parameters(aggregator)
     print("--------------------------")
     
+    
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = GradScaler(device=device.type) if torch.cuda.is_available() else None
     criterion = nn.CrossEntropyLoss()
     
@@ -105,10 +114,10 @@ if __name__ == '__main__':
             model, aggregator, train_loader, optimizer, criterion, 
             args.t, args.m, args.r, device, scaler
         )
-        val_batches = len(val_loader)
+        scheduler.step()
         _, t_accuracy = evaluate(
             model, aggregator, train_loader, criterion, 
-            args.t, args.m, args.r, device, tag="train", #max_batches=val_batches
+            args.t, args.m, args.r, device, tag="train", 
         )
         val_loss, val_accuracy = evaluate(
             model, aggregator, val_loader, criterion, 
@@ -161,7 +170,8 @@ if __name__ == '__main__':
     model.to(device)
     print("Loaded best model from checkpoint.")
 
-    plot_classif(stats, file_base)
+    random_accuracy = 1.0 / args.m
+    plot_classif(stats, file_base, random_accuracy)
     
     # Final test evaluation on fresh data
 
@@ -172,6 +182,8 @@ if __name__ == '__main__':
     )
     print(f"Test Set Performance | Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}")
 
+
+    log_training_run(file_base, args, stats, test_loss, test_accuracy, start, end, model, aggregator)
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
     

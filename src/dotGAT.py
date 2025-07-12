@@ -36,26 +36,29 @@ class DotGATHead(nn.Module):
         # x: [batch_size, num_agents, hidden_dim]
         B, A, H = x.shape
         connectivity = connectivity.to(x.device)
-        
-        x = x.view(B * A, H)  # Flatten batch and agents
+        x = self.norm(x)
+        #x = x.view(B * A, H)  # Flatten batch and agents
         # Compute query, key, and value matrices
-        Q = self.q_proj(x).view(B, A, -1)
-        K = self.k_proj(x).view(B, A, -1)
-        V = self.v_proj(x).view(B, A, -1)
+        ATT_HEADS: int = 4
+        Q = self.q_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
+        K = self.k_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
+        V = self.v_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
 
+        out = F.scaled_dot_product_attention(Q, K, V, is_causal=False)
         # Compute scaled dot-product attention scores
-        scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
+        # scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
 
-        # Add -inf mask where connectivity is 0
-        mask = (connectivity == 0).float() * -1e9  # [A, A]
-        scores = scores + mask        # [B, A, A]
+        # # Add -inf mask where connectivity is 0
+        # mask = (connectivity == 0).float() * -1e9  # [A, A]
+        # scores = scores + mask        # [B, A, A]
         
-        # Full attention (no top-k)
-        alpha = F.softmax(scores, dim=-1)
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+        # # Full attention (no top-k)
+        # alpha = F.softmax(scores, dim=-1)
+        # alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         
-        H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
-        out = self.forward_proj(H)
+        # H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
+        out = out.transpose(1,2).view(B, A, -1)
+        out = self.forward_proj(out)
         return self.norm(out)
 
 
@@ -249,26 +252,31 @@ class CollectiveClassifier(nn.Module):
         self.num_agents = num_agents
         self.agent_outputs_dim = agent_outputs_dim
         self.output_dim = m
-        self.decode = nn.Sequential(nn.Linear(agent_outputs_dim, m), Swish())
-        if num_agents > 1:
-            self.gate_mlp = nn.Sequential(Swish(), nn.Linear(m, 1))
+        self.decode = nn.Sequential(Swish(), nn.Linear(agent_outputs_dim, m), Swish())
+        #if num_agents > 1:
+        #    self.gate_mlp = nn.Sequential(Swish(), nn.Linear(m, 1))
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
-        agent_outputs: [B, A, nm] 
-        intermediate prediction (softmax): [B, A, m]
+        agent_outputs: [B, A, H] 
+        intermediate prediction: [B, A, m]
         returns: [B, m] aggregated logits
         """
-        B, A, nm = agent_outputs.shape
-        assert A == self.num_agents and nm == self.agent_outputs_dim
-        
-        agent_preds = self.decode(agent_outputs)
+        B, A, H = agent_outputs.shape
+        assert A == self.num_agents and H == self.agent_outputs_dim
+
+        agent_preds = self.decode(agent_outputs) # [B, A, m]
         
         if self.num_agents == 1:
             return agent_preds.squeeze(1)
         else:
-            gates = self.gate_mlp(agent_preds)  
-            weights = F.softmax(gates, dim=1)     
-            weighted_pred = agent_preds * weights  
-            return weighted_pred.sum(dim=1)     
-
+            # GATED AVERAGE
+            # gates = self.gate_mlp(agent_preds)  
+            # weights = F.softmax(gates, dim=1)     
+            # weighted_pred = agent_preds * weights
+            # out = weighted_pred.sum(dim=1)
+            
+            # SIMPLE AVERAGE 
+            out = agent_preds.sum(dim = 1) / self.num_agents # [B, m]
+            return out  
+            #return agent_preds

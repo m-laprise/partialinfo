@@ -17,8 +17,8 @@ class GTMatrices(Dataset):
         return self.U.shape[0]
     
     def _generate_factors(self, num_matrices: int):
-        U = torch.randn(num_matrices, self.t, self.r, dtype=torch.float32)
-        V = torch.randn(num_matrices, self.m, self.r, dtype=torch.float32) 
+        U = torch.rand(num_matrices, self.t, self.r, dtype=torch.float32) * 2
+        V = torch.rand(num_matrices, self.m, self.r, dtype=torch.float32) * 2
         return U, V
 
     def generate_matrices(self, idx = None):

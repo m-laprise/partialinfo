@@ -58,7 +58,7 @@ class DotGATHead(nn.Module):
         # alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         
         # H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
-        out = out.transpose(1,2).view(B, A, -1)
+        out = out.transpose(1,2).reshape(B, A, -1)
         out = self.forward_proj(out)
         return self.norm(out)
 
@@ -96,10 +96,7 @@ class DistributedDotGAT(nn.Module):
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
         
         if message_steps > 0:
-            self.gat_heads = nn.ModuleList([
-                DotGATHead(hidden_dim, hidden_dim, dropout=dropout)
-                for _ in range(num_heads)
-            ])
+            self.gat_head = DotGATHead(hidden_dim, hidden_dim, dropout=dropout)
 
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)
@@ -157,16 +154,7 @@ class DistributedDotGAT(nn.Module):
         for _ in range(self.message_steps):
             h_prev = h
             connectivity = self.connectivity.unsqueeze(0)
-            head_outputs = [head(h, connectivity) for head in self.gat_heads]
-            stacked = torch.stack(head_outputs)  # [num_heads, B, A, H]
-            
-            # Max-pool across heads based on absolute values
-            abs_vals = torch.abs(stacked)
-            max_indices = abs_vals.argmax(dim=0)  # [B, A, H]
-
-            # Gather max across heads
-            stacked = stacked.permute(1, 2, 3, 0).contiguous()  # [B, A, H, num_heads]
-            h_new = torch.gather(stacked, dim=-1, index=max_indices.unsqueeze(-1)).squeeze(-1) # [B, A, H]
+            h_new = self.gat_head(h, connectivity)
             h = h_prev + h_new
         return h
     

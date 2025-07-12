@@ -44,7 +44,8 @@ class DotGATHead(nn.Module):
         K = self.k_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
         V = self.v_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
 
-        out = F.scaled_dot_product_attention(Q, K, V, is_causal=False)
+        out = F.scaled_dot_product_attention(Q, K, V, is_causal=False, 
+                                             attn_mask=connectivity, dropout_p=self.dropout)
         # Compute scaled dot-product attention scores
         # scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
 
@@ -154,6 +155,7 @@ class DistributedDotGAT(nn.Module):
         
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
         for _ in range(self.message_steps):
+            h_prev = h
             connectivity = self.connectivity.unsqueeze(0)
             head_outputs = [head(h, connectivity) for head in self.gat_heads]
             stacked = torch.stack(head_outputs)  # [num_heads, B, A, H]
@@ -164,7 +166,8 @@ class DistributedDotGAT(nn.Module):
 
             # Gather max across heads
             stacked = stacked.permute(1, 2, 3, 0).contiguous()  # [B, A, H, num_heads]
-            h = torch.gather(stacked, dim=-1, index=max_indices.unsqueeze(-1)).squeeze(-1) # [B, A, H]
+            h_new = torch.gather(stacked, dim=-1, index=max_indices.unsqueeze(-1)).squeeze(-1) # [B, A, H]
+            h = h_prev + h_new
         return h
     
     def forward(self, x):

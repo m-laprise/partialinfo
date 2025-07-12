@@ -82,6 +82,8 @@ def plot_classif(stats, filename_base, random_accuracy):
 
     axs[1].plot(epochs, stats["t_accuracy"], label="Train Accuracy", color='tab:blue')
     axs[1].plot(epochs, stats["val_accuracy"], label="Val Accuracy", color='tab:orange')
+    axs[1].plot(epochs, stats["t_agreement"], label="Train Agreement", color='tab:blue', linestyle='dotted')
+    axs[1].plot(epochs, stats["val_agreement"], label="Val Agreement", color='tab:orange', linestyle='dotted')
     axs[1].axhline(y=random_accuracy, label="Random guessing", color='tab:grey', linestyle='--')
     axs[1].set_title("Classification Accuracy")
     axs[1].set_xlabel("Epoch")

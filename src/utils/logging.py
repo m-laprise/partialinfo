@@ -6,7 +6,7 @@ import psutil
 import torch
 
 
-def log_training_run(filename_base, args, stats, test_loss, test_accuracy, start_time, end_time, model, aggregator):
+def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_agreement, start_time, end_time, model, aggregator):
     log_file = f"{filename_base}_log.txt"
 
     # Git commit hash
@@ -78,13 +78,14 @@ def log_training_run(filename_base, args, stats, test_loss, test_accuracy, start
         f.write(f"Total Training Time: {training_time:.2f} minutes\n")
         f.write(f"Final Test Loss: {test_loss:.2e}\n")
         f.write(f"Final Test Accuracy: {test_accuracy:.2f}\n\n")
+        f.write(f"Final Test % in Majority: {test_agreement:.2f}\n\n")
 
         f.write("Epoch Performance\n")
         f.write("-----------------\n")
-        f.write("Epoch | Train Loss | Train Acc | Val Loss | Val Acc\n")
-        f.write("------|------------|-----------|----------|--------\n")
-        for i, (tl, ta, vl, va) in enumerate(zip(stats["train_loss"], stats["t_accuracy"],
-                                                 stats["val_loss"], stats["val_accuracy"]), 1):
-            f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {vl:.2e} | {va:.2f}\n")
+        f.write("Epoch | Train Loss | Train Acc | T % maj | Val Loss | Val Acc | V % maj\n")
+        f.write("------|------------|---------|-----------|----------|---------|---------\n")
+        for i, (tl, ta, tm, vl, va, vm) in enumerate(zip(stats["train_loss"], stats["t_accuracy"], stats["t_agreement"],
+                                                 stats["val_loss"], stats["val_accuracy"], stats["val_agreement"]), 1):
+            f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f} | {vl:.2e} | {va:.2f} | {vm:.2f}\n")
 
     print(f"Training log saved to: {log_file}")

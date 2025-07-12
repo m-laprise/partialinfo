@@ -277,6 +277,6 @@ class CollectiveClassifier(nn.Module):
             # out = weighted_pred.sum(dim=1)
             
             # SIMPLE AVERAGE 
-            out = agent_preds.sum(dim = 1) / self.num_agents # [B, m]
-            return out  
-            #return agent_preds
+            #out = agent_preds.sum(dim = 1) / self.num_agents # [B, m]
+            #return out  
+            return agent_preds

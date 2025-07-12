@@ -15,10 +15,16 @@ from torch.utils.data import DataLoader
 
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
 from dotGAT import CollectiveClassifier, DistributedDotGAT
+from utils.logging import log_training_run
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif
-from utils.logging import log_training_run
-from utils.training_temporal import evaluate, init_stats, init_weights, train
+from utils.training_temporal import (
+    evaluate,
+    init_stats,
+    init_weights,
+    stacked_cross_entropy_loss,
+    train,
+)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -97,7 +103,7 @@ if __name__ == '__main__':
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = GradScaler(device=device.type) if torch.cuda.is_available() else None
-    criterion = nn.CrossEntropyLoss()
+    criterion = stacked_cross_entropy_loss
     
     stats = init_stats()
     file_base = unique_filename()
@@ -115,26 +121,28 @@ if __name__ == '__main__':
             args.t, args.m, args.r, device, scaler
         )
         scheduler.step()
-        _, t_accuracy = evaluate(
+        _, t_accuracy, t_agreement = evaluate(
             model, aggregator, train_loader, criterion, 
             args.t, args.m, args.r, device, tag="train", 
         )
-        val_loss, val_accuracy = evaluate(
+        val_loss, val_accuracy, val_agreement = evaluate(
             model, aggregator, val_loader, criterion, 
             args.t, args.m, args.r, device, tag="val"
         )
         
         stats["train_loss"].append(train_loss)
         stats["t_accuracy"].append(t_accuracy)
+        stats["t_agreement"].append(t_agreement)
         stats["val_loss"].append(val_loss)
         stats["val_accuracy"].append(val_accuracy)
+        stats["val_agreement"].append(val_agreement)
         
         if epoch == 1:
             t1 = datetime.now()
             print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
         
         if epoch % 50 == 0 or epoch == 1:
-            print(f"Ep {epoch:03d}. T loss: {train_loss:.2e} | T acc: {t_accuracy:.2f} | V loss: {val_loss:.2e} | V acc: {val_accuracy:.2f}")
+            print(f"Ep {epoch:03d}. T loss: {train_loss:.2e} | T acc: {t_accuracy:.2f} | T % maj: {t_agreement:.2f} | V loss: {val_loss:.2e} | V acc: {val_accuracy:.2f} | V % maj: {val_agreement:.2f}")
         
         # Save connectivity matrix for visualization
         #adj_matrix = model.connectivity.detach().cpu().numpy()
@@ -176,14 +184,14 @@ if __name__ == '__main__':
     # Final test evaluation on fresh data
 
     test_loader = DataLoader(test_data, batch_size=args.batch_size)
-    test_loss, test_accuracy = evaluate(
+    test_loss, test_accuracy, test_agreement = evaluate(
         model, aggregator, test_loader, criterion, 
         args.t, args.m, args.r, device, tag="test"
     )
-    print(f"Test Set Performance | Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}")
+    print(f"Test Set Performance | Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}, % maj: {test_agreement:.2f}")
 
 
-    log_training_run(file_base, args, stats, test_loss, test_accuracy, start, end, model, aggregator)
+    log_training_run(file_base, args, stats, test_loss, test_accuracy, test_agreement, start, end, model, aggregator)
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
     

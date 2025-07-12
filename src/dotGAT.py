@@ -85,11 +85,11 @@ class DistributedDotGAT(nn.Module):
         self.dropout = dropout
         self.adjacency_mode = adjacency_mode
         
-        device = torch.device('cuda' if torch.cuda.is_available() 
-                          else 'mps' if torch.backends.mps.is_available() else 'cpu')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.sensing_masks = sensing_masks
         #self.agent_input_projs = self._build_input_projs(num_agents, input_dim, hidden_dim)
-        self.W = nn.Parameter(torch.zeros(size=(num_agents, input_dim, hidden_dim)))
+        self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
+        nn.init.kaiming_uniform_(self.W_embed, a=0.5)
         self.norm = nn.LayerNorm(hidden_dim)
         
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
@@ -171,7 +171,7 @@ class DistributedDotGAT(nn.Module):
         # x: [batch, num_agents, input_dim]
         x = self.sense(x)
         #h = self.agent_input_projs(x)  # [B, A, H]
-        agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W)
+        agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W_embed)
         h = self.norm(agents_embeddings)
 
         # Do attention-based message passing if message_steps > 0; otherwise,
@@ -257,7 +257,12 @@ class CollectiveClassifier(nn.Module):
         self.num_agents = num_agents
         self.agent_outputs_dim = agent_outputs_dim
         self.output_dim = m
-        self.decode = nn.Sequential(Swish(), nn.Linear(agent_outputs_dim, m), Swish())
+        #self.decode = nn.Sequential(Swish(), nn.Linear(agent_outputs_dim, m), Swish())
+        self.W_decode = nn.Parameter(torch.empty(size=(num_agents, agent_outputs_dim, m)))
+        nn.init.kaiming_uniform_(self.W_decode, a=0.5)
+        self.nonlinearity = Swish()
+        self.norm_in = nn.LayerNorm(agent_outputs_dim)
+        self.norm_out = nn.LayerNorm(m)
         #if num_agents > 1:
         #    self.gate_mlp = nn.Sequential(Swish(), nn.Linear(m, 1))
 
@@ -269,7 +274,10 @@ class CollectiveClassifier(nn.Module):
         B, A, H = agent_outputs.shape
         assert A == self.num_agents and H == self.agent_outputs_dim
 
-        agent_preds = self.decode(agent_outputs) # [B, A, m]
+        #agent_preds = self.decode(agent_outputs) # [B, A, m]
+        agent_outputs = self.norm_in(agent_outputs)
+        agent_decoded = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
+        agent_preds = self.nonlinearity(self.norm_out(agent_decoded))
         
         if self.num_agents == 1:
             return agent_preds.squeeze(1)

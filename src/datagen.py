@@ -135,7 +135,7 @@ def compute_avg_agent_overlap(agent_views: torch.Tensor) -> float:
     across all pairs of agents.
     """
     A, D = agent_views.shape
-    binary = (agent_views > 0).float()
+    binary = (agent_views != 0).float()
     overlaps = []
     for i in range(A):
         for j in range(i + 1, A):

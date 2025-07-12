@@ -70,7 +70,7 @@ def train(model, aggregator, loader, optimizer, theta, criterion,
         batch_size = batch.num_graphs
 
         # Inputs to the model (agent views)
-        x = batch.x.view(batch_size, model.num_agents, -1).to(device, non_blocking=torch.cuda.is_available())
+        x = batch.x.view(batch_size, model[0].num_agents, -1).to(device, non_blocking=torch.cuda.is_available())
         target = batch.y.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, n * m]
         mask = batch.mask.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, n * m]
         
@@ -99,7 +99,7 @@ def train(model, aggregator, loader, optimizer, theta, criterion,
             optimizer.step()
 
         # Apply structural constraints (e.g., freeze connectivity)
-        model.freeze_nonlearnable()
+        model[0].freeze_nonlearnable()
 
         total_loss += loss.item()
         
@@ -120,7 +120,7 @@ def evaluate(
         
         batch_size = batch.num_graphs
 
-        x = batch.x.view(batch_size, model.num_agents, -1).to(device, non_blocking=torch.cuda.is_available())
+        x = batch.x.view(batch_size, model[0].num_agents, -1).to(device, non_blocking=torch.cuda.is_available())
         out = model(x)
         prediction = aggregator(out)  # [B, nm]
         target = batch.y.view(batch_size, -1).to(device, non_blocking=torch.cuda.is_available())

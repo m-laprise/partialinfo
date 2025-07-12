@@ -62,7 +62,7 @@ from torch.amp.grad_scaler import GradScaler
 from torch_geometric.loader import DataLoader
 
 from datagen import AgentMatrixReconstructionDataset
-from dotGAT import Aggregator, DistributedDotGAT
+from dotGAT import Aggregator, DistributedDotGAT, ReconDecoder
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_stats
 from utils.training import evaluate, init_stats, init_weights, train
@@ -119,7 +119,7 @@ if __name__ == '__main__':
         pin_memory=torch.cuda.is_available()
     )
 
-    model = DistributedDotGAT(
+    network = DistributedDotGAT(
         input_dim=train_set.input_dim,
         hidden_dim=args.hidden_dim,
         n=args.n, m=args.m,
@@ -128,9 +128,18 @@ if __name__ == '__main__':
         dropout=args.dropout,
         message_steps=args.steps,
         adjacency_mode=args.adjacency_mode
-    ).to(device)
-    model.apply(init_weights)
+    )
+    network.apply(init_weights)
+    decoder = ReconDecoder(
+        hidden_dim=args.hidden_dim,
+        n=args.n, m=args.m,
+        num_agents=args.num_agents
+    )
+    decoder.apply(init_weights)
+    
+    model = nn.Sequential(network, decoder).to(device)
     count_parameters(model)
+    print("--------------------------")
     
     aggregator = Aggregator(
         num_agents=args.num_agents, output_dim=args.n * args.m
@@ -154,7 +163,7 @@ if __name__ == '__main__':
     
     with torch.no_grad():
         batch = next(iter(train_loader))
-        x = batch.x.view(batch.num_graphs, model.num_agents, -1).to(device, non_blocking=True)
+        x = batch.x.view(batch.num_graphs, args.num_agents, -1).to(device, non_blocking=True)
         out = model(x)
         recon = aggregator(out)
         print("Initial output variance:", recon.var().item())

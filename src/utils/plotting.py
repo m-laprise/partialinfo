@@ -66,6 +66,33 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     fig.savefig(f"{filename_base}_spectral_diagnostics.png")
     plt.close(fig)
     
+
+def plot_classif(stats, filename_base):
+    epochs = np.arange(1, len(stats["train_loss"]) + 1)
+    # Plot loss-related metrics in two panels
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
+    axs[0].plot(epochs, np.log(stats["train_loss"]), label="Train Loss", color='tab:blue')
+    axs[0].plot(epochs, np.log(stats["val_loss"]), label="Val Loss", color='tab:orange')
+    axs[0].set_title("Loss")
+    axs[0].set_xlabel("Epoch")
+    axs[0].set_ylabel("Log Cross-Entropy Loss")
+    axs[0].grid(True)
+    axs[0].legend()
+    axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    axs[1].plot(epochs, stats["t_accuracy"], label="Train Accuracy", color='tab:blue')
+    axs[1].plot(epochs, stats["val_accuracy"], label="Val Accuracy", color='tab:orange')
+    axs[1].set_title("Classification Accuracy")
+    axs[1].set_xlabel("Epoch")
+    axs[1].set_ylabel("% Accuracy")
+    axs[1].grid(True)
+    axs[1].legend()
+    axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    fig.tight_layout()
+    fig.savefig(f"{filename_base}_classif_metrics.png")
+    plt.close(fig)
+
     
 def plot_connectivity_matrices(directory, prefix, max_cols=5, cmap='coolwarm'):
     # Gather all saved connectivity matrices
@@ -98,11 +125,11 @@ def plot_connectivity_matrices(directory, prefix, max_cols=5, cmap='coolwarm'):
         axs[i].set_yticks([])
 
     # Remove any unused subplots
-    for j in range(i + 1, len(axs)):
-        axs[j].axis("off")
+    # for j in range(i + 1, len(axs)):
+    #     axs[j].axis("off")
 
-    cbar = fig.colorbar(im, ax=axs[:i+1], orientation="vertical", fraction=0.02, pad=0.04)
-    cbar.set_label("Connectivity Strength")
+    # cbar = fig.colorbar(im, ax=axs[:i+1], orientation="vertical", fraction=0.02, pad=0.04)
+    # cbar.set_label("Connectivity Strength")
     plt.tight_layout()
     plt.suptitle("Evolution of Agent Connectivity Over Epochs", fontsize=16, y=1.02)
     plt.savefig(os.path.join(directory, f"{prefix}_connectivity_evolution.png"))

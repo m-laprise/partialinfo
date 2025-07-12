@@ -1,9 +1,12 @@
 import math
+from typing import Union
 
 import networkx as nx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from datagen_temporal import SensingMasks
 
 
 class Swish(nn.Module):
@@ -11,7 +14,7 @@ class Swish(nn.Module):
         return x * torch.sigmoid(x)
     
 
-class DotGATLayer(nn.Module):
+class DotGATHead(nn.Module):
     def __init__(self, in_features: int, out_features: int, dropout: float = 0):
         super().__init__()
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
@@ -68,6 +71,7 @@ class DistributedDotGAT(nn.Module):
         dropout: float,
         adjacency_mode: str = 'none',
         message_steps: int = 3,
+        sensing_masks: Union[None, SensingMasks] = None
     ):
         super().__init__()
         self.output_dim = n * m
@@ -80,19 +84,19 @@ class DistributedDotGAT(nn.Module):
         
         device = torch.device('cuda' if torch.cuda.is_available() 
                           else 'mps' if torch.backends.mps.is_available() else 'cpu')
+        self.sensing_masks = sensing_masks
         self.agent_input_proj = self._build_input_proj(input_dim, hidden_dim)
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
         
         if message_steps > 0:
             self.gat_heads = nn.ModuleList([
-                DotGATLayer(hidden_dim, hidden_dim, dropout=dropout)
+                DotGATHead(hidden_dim, hidden_dim, dropout=dropout)
                 for _ in range(num_heads)
             ])
 
-        self.maxrank = min(self.n // 2, self.m // 2)
-        self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
-        self.V_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
-
+    def sense(self, x):
+        return x if self.sensing_masks is None else self.sensing_masks(x)
+    
     def _build_input_proj(self, in_dim: int, hidden_dim: int) -> nn.Sequential:
         return nn.Sequential(
             nn.Linear(in_dim, 2 * hidden_dim, bias=False),
@@ -159,6 +163,7 @@ class DistributedDotGAT(nn.Module):
     
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
+        x = self.sense(x)
         h = self.agent_input_proj(x)  # [B, A, H]
 
         # Do attention-based message passing if message_steps > 0; otherwise,
@@ -166,15 +171,7 @@ class DistributedDotGAT(nn.Module):
         if self.message_steps > 0:
             h = self._message_passing(h)
         
-        B, A, H = h.shape
-        # Compute U and V from shared projections
-        U = self.U_proj(h).view(B, A, self.n, self.maxrank)  # [B, A, n, maxrank]
-        V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, maxrank]
-
-        # Compute H = U @ Vt for each agent
-        recon = torch.matmul(U, V.transpose(-1, -2)) / self.maxrank # [B, A, n, m]
-        recon = recon.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
-        return recon  # [batch, num_agents, output_dim]
+        return h
         
     @torch.no_grad()
     def freeze_nonlearnable(self):
@@ -182,6 +179,28 @@ class DistributedDotGAT(nn.Module):
             if not hasattr(self, 'adj_grad_mask'):
                 raise RuntimeError("adj_grad_mask missing.")
             self.connectivity.data = self.connectivity.data * self.adj_grad_mask
+
+
+class ReconDecoder(nn.Module):
+    def __init__(self, hidden_dim, n, m, num_agents):
+        super().__init__()
+        self.output_dim = n * m
+        self.n, self.m = n, m
+        self.num_agents = num_agents
+        self.hidden_dim = hidden_dim
+        self.maxrank = min(self.n // 2, self.m // 2)
+        self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
+        self.V_proj = nn.Linear(hidden_dim, self.m * self.maxrank, bias=False)
+
+    def forward(self, h):
+        B, A, H = h.shape
+        U = self.U_proj(h).view(B, A, self.n, self.maxrank)  # [B, A, n, maxrank]
+        V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, maxrank]
+
+        # Compute H = U @ Vt for each agent
+        recon = torch.matmul(U, V.transpose(-1, -2)) / self.maxrank # [B, A, n, m]
+        recon = recon.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
+        return recon  # [batch, num_agents, output_dim]
 
 
 class Aggregator(nn.Module):
@@ -219,4 +238,37 @@ class Aggregator(nn.Module):
             weights = F.softmax(gates, dim=1)     # [B, A, 1]
             weighted_output = agent_outputs * weights  # [B, A, D]
             return weighted_output.sum(dim=1)     # [B, D]
+
+
+class CollectiveClassifier(nn.Module):
+    """
+    Input-dependent classification module from internal states to logits.
+    """
+    def __init__(self, num_agents: int, agent_outputs_dim: int, m: int, hidden_dim: int=4):
+        super().__init__()
+        self.num_agents = num_agents
+        self.agent_outputs_dim = agent_outputs_dim
+        self.output_dim = m
+        self.decode = nn.Sequential(nn.Linear(agent_outputs_dim, m), Swish())
+        if num_agents > 1:
+            self.gate_mlp = nn.Sequential(Swish(), nn.Linear(m, 1))
+
+    def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
+        """
+        agent_outputs: [B, A, nm] 
+        intermediate prediction (softmax): [B, A, m]
+        returns: [B, m] aggregated logits
+        """
+        B, A, nm = agent_outputs.shape
+        assert A == self.num_agents and nm == self.agent_outputs_dim
+        
+        agent_preds = self.decode(agent_outputs)
+        
+        if self.num_agents == 1:
+            return agent_preds.squeeze(1)
+        else:
+            gates = self.gate_mlp(agent_preds)  
+            weights = F.softmax(gates, dim=1)     
+            weighted_pred = agent_preds * weights  
+            return weighted_pred.sum(dim=1)     
 

@@ -88,7 +88,10 @@ class DistributedDotGAT(nn.Module):
         device = torch.device('cuda' if torch.cuda.is_available() 
                           else 'mps' if torch.backends.mps.is_available() else 'cpu')
         self.sensing_masks = sensing_masks
-        self.agent_input_proj = self._build_input_proj(input_dim, hidden_dim)
+        #self.agent_input_projs = self._build_input_projs(num_agents, input_dim, hidden_dim)
+        self.W = nn.Parameter(torch.zeros(size=(num_agents, input_dim, hidden_dim)))
+        self.norm = nn.LayerNorm(hidden_dim)
+        
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
         
         if message_steps > 0:
@@ -100,14 +103,14 @@ class DistributedDotGAT(nn.Module):
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)
     
-    def _build_input_proj(self, in_dim: int, hidden_dim: int) -> nn.Sequential:
-        return nn.Sequential(
-            nn.Linear(in_dim, 2 * hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(2 * hidden_dim),
-            nn.Linear(2 * hidden_dim, 2 * hidden_dim, bias=False),
-            Swish(), nn.LayerNorm(2 * hidden_dim),
-            nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
-        )
+    #def _build_input_proj(self, in_dim: int, hidden_dim: int):
+        # return nn.Sequential(
+        #     nn.Linear(in_dim, 2 * hidden_dim, bias=False),
+        #     Swish(), nn.LayerNorm(2 * hidden_dim),
+        #     nn.Linear(2 * hidden_dim, 2 * hidden_dim, bias=False),
+        #     Swish(), nn.LayerNorm(2 * hidden_dim),
+        #     nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
+        # )
         
     def _init_connectivity(self, mode: str, num_agents: int, device: torch.device) -> torch.Tensor:
         if mode == 'none':
@@ -167,7 +170,9 @@ class DistributedDotGAT(nn.Module):
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
         x = self.sense(x)
-        h = self.agent_input_proj(x)  # [B, A, H]
+        #h = self.agent_input_projs(x)  # [B, A, H]
+        agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W)
+        h = self.norm(agents_embeddings)
 
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
@@ -245,9 +250,9 @@ class Aggregator(nn.Module):
 
 class CollectiveClassifier(nn.Module):
     """
-    Input-dependent classification module from internal states to logits.
+    Classification module decoding internal states to logits for each agent.
     """
-    def __init__(self, num_agents: int, agent_outputs_dim: int, m: int, hidden_dim: int=4):
+    def __init__(self, num_agents: int, agent_outputs_dim: int, m: int):
         super().__init__()
         self.num_agents = num_agents
         self.agent_outputs_dim = agent_outputs_dim
@@ -259,8 +264,7 @@ class CollectiveClassifier(nn.Module):
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
         agent_outputs: [B, A, H] 
-        intermediate prediction: [B, A, m]
-        returns: [B, m] aggregated logits
+        returns intermediate logits: [B, A, m]
         """
         B, A, H = agent_outputs.shape
         assert A == self.num_agents and H == self.agent_outputs_dim

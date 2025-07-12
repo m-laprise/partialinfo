@@ -8,7 +8,6 @@ import gc
 from datetime import datetime
 
 import torch
-import torch.nn as nn
 from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader

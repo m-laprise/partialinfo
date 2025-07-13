@@ -36,7 +36,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_agents', type=int, default=30, help='Number of agents')
     # Model hyperparameters
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension of the model')
-    parser.add_argument('--num_heads', type=int, default=1)
     # Message passing hyperparameters
     parser.add_argument('--att_heads', type=int, default=4, help='Number of attention heads in the message passing layers') 
     parser.add_argument('--adjacency_mode', type=str, default='none', choices=['none', 'learned'], help='Whether adjacency matrix for message-passing is all-to-all or learned')
@@ -80,7 +79,7 @@ if __name__ == '__main__':
         hidden_dim=args.hidden_dim,
         n=args.t, m=args.m,
         num_agents=args.num_agents,
-        num_heads=args.num_heads,
+        num_heads=args.att_heads,
         dropout=args.dropout,
         message_steps=args.steps,
         adjacency_mode=args.adjacency_mode,

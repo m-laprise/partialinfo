@@ -15,17 +15,17 @@ class Swish(nn.Module):
     
 
 class DotGATHead(nn.Module):
-    def __init__(self, in_features: int, out_features: int, dropout: float = 0):
+    def __init__(self, in_features: int, out_features: int, dropout: float = 0, heads: int = 4):
         super().__init__()
+        self.heads = heads
         self.q_proj = nn.Linear(in_features, out_features, bias=False)
         self.k_proj = nn.Linear(in_features, out_features, bias=False)
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
         
         self.forward_proj = nn.Sequential(
-            Swish(), nn.LayerNorm(out_features), 
-            nn.Linear(out_features, out_features),
-            Swish(), nn.LayerNorm(out_features), 
-            nn.Linear(out_features, out_features),
+            nn.LayerNorm(out_features), 
+            nn.Linear(out_features, out_features), Swish(),
+            nn.Linear(out_features, out_features), Swish()
         )
         
         self.norm = nn.LayerNorm(out_features)
@@ -37,27 +37,15 @@ class DotGATHead(nn.Module):
         B, A, H = x.shape
         connectivity = connectivity.to(x.device)
         x = self.norm(x)
-        #x = x.view(B * A, H)  # Flatten batch and agents
+
         # Compute query, key, and value matrices
-        ATT_HEADS: int = 4
-        Q = self.q_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
-        K = self.k_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
-        V = self.v_proj(x).view(B, A, ATT_HEADS, -1).transpose(1, 2)
+        Q = self.q_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
+        K = self.k_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
+        V = self.v_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
 
+        dropout = self.dropout if self.training else 0
         out = F.scaled_dot_product_attention(Q, K, V, is_causal=False, 
-                                             attn_mask=connectivity, dropout_p=self.dropout)
-        # Compute scaled dot-product attention scores
-        # scores = torch.matmul(Q, K.transpose(1, 2)) / self.scale  # [B, A, A]
-
-        # # Add -inf mask where connectivity is 0
-        # mask = (connectivity == 0).float() * -1e9  # [A, A]
-        # scores = scores + mask        # [B, A, A]
-        
-        # # Full attention (no top-k)
-        # alpha = F.softmax(scores, dim=-1)
-        # alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        
-        # H = torch.matmul(alpha, V)  # [B, A, hidden_dim]
+                                             attn_mask=connectivity, dropout_p=dropout)
         out = out.transpose(1,2).reshape(B, A, -1)
         out = self.forward_proj(out)
         return self.norm(out)
@@ -88,7 +76,6 @@ class DistributedDotGAT(nn.Module):
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.sensing_masks = sensing_masks
-        #self.agent_input_projs = self._build_input_projs(num_agents, input_dim, hidden_dim)
         self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
         nn.init.kaiming_uniform_(self.W_embed, a=0.5)
         self.norm = nn.LayerNorm(hidden_dim)
@@ -96,19 +83,10 @@ class DistributedDotGAT(nn.Module):
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
         
         if message_steps > 0:
-            self.gat_head = DotGATHead(hidden_dim, hidden_dim, dropout=dropout)
+            self.gat_head = DotGATHead(hidden_dim, hidden_dim, dropout=dropout, heads=num_heads)
 
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)
-    
-    #def _build_input_proj(self, in_dim: int, hidden_dim: int):
-        # return nn.Sequential(
-        #     nn.Linear(in_dim, 2 * hidden_dim, bias=False),
-        #     Swish(), nn.LayerNorm(2 * hidden_dim),
-        #     nn.Linear(2 * hidden_dim, 2 * hidden_dim, bias=False),
-        #     Swish(), nn.LayerNorm(2 * hidden_dim),
-        #     nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
-        # )
         
     def _init_connectivity(self, mode: str, num_agents: int, device: torch.device) -> torch.Tensor:
         if mode == 'none':
@@ -161,7 +139,7 @@ class DistributedDotGAT(nn.Module):
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
         x = self.sense(x)
-        #h = self.agent_input_projs(x)  # [B, A, H]
+
         agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W_embed)
         h = self.norm(agents_embeddings)
 
@@ -248,14 +226,10 @@ class CollectiveClassifier(nn.Module):
         self.num_agents = num_agents
         self.agent_outputs_dim = agent_outputs_dim
         self.output_dim = m
-        #self.decode = nn.Sequential(Swish(), nn.Linear(agent_outputs_dim, m), Swish())
         self.W_decode = nn.Parameter(torch.empty(size=(num_agents, agent_outputs_dim, m)))
         nn.init.kaiming_uniform_(self.W_decode, a=0.5)
-        self.nonlinearity = Swish()
+        self.activation = Swish()
         self.norm_in = nn.LayerNorm(agent_outputs_dim)
-        self.norm_out = nn.LayerNorm(m)
-        #if num_agents > 1:
-        #    self.gate_mlp = nn.Sequential(Swish(), nn.Linear(m, 1))
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
@@ -265,21 +239,11 @@ class CollectiveClassifier(nn.Module):
         B, A, H = agent_outputs.shape
         assert A == self.num_agents and H == self.agent_outputs_dim
 
-        #agent_preds = self.decode(agent_outputs) # [B, A, m]
         agent_outputs = self.norm_in(agent_outputs)
         agent_decoded = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
-        agent_preds = self.nonlinearity(self.norm_out(agent_decoded))
+        agent_preds = self.activation(agent_decoded)
         
         if self.num_agents == 1:
             return agent_preds.squeeze(1)
         else:
-            # GATED AVERAGE
-            # gates = self.gate_mlp(agent_preds)  
-            # weights = F.softmax(gates, dim=1)     
-            # weighted_pred = agent_preds * weights
-            # out = weighted_pred.sum(dim=1)
-            
-            # SIMPLE AVERAGE 
-            #out = agent_preds.sum(dim = 1) / self.num_agents # [B, m]
-            #return out  
             return agent_preds

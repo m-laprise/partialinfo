@@ -1,6 +1,9 @@
 """
 Dot product graph attention network for distributed inductive matrix completion, 
 with learned agent-based message passing setup.
+
+Next steps:
+- Structured temporal data
 """
 
 import argparse
@@ -38,17 +41,17 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension of the model')
     # Message passing hyperparameters
     parser.add_argument('--att_heads', type=int, default=4, help='Number of attention heads in the message passing layers') 
-    parser.add_argument('--adjacency_mode', type=str, default='none', choices=['none', 'learned'], help='Whether adjacency matrix for message-passing is all-to-all or learned')
+    parser.add_argument('--adjacency_mode', type=str, default='learned', choices=['none', 'learned'], help='Whether adjacency matrix for message-passing is all-to-all or learned')
     parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     # Training hyperparameters
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout probability during training')
     parser.add_argument('--lr', type=float, default=0.001, help='Initial learning rate')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
-    parser.add_argument('--patience', type=int, default=200, help='Early stopping patience')
+    parser.add_argument('--patience', type=int, default=0, help='Early stopping patience')
     parser.add_argument('--train_n', type=int, default=500, help='Number of training matrices')
-    parser.add_argument('--val_n', type=int, default=64, help='Number of validation matrices')
-    parser.add_argument('--test_n', type=int, default=64, help='Number of test matrices')
+    parser.add_argument('--val_n', type=int, default=100, help='Number of validation matrices')
+    parser.add_argument('--test_n', type=int, default=100, help='Number of test matrices')
     
     args = parser.parse_args()
 
@@ -60,10 +63,10 @@ if __name__ == '__main__':
     test_GT = GTMatrices(num_matrices=args.test_n, t=args.t, m=args.m, r=args.r)
     
     train_data = TemporalData(train_GT)
-    val_data = TemporalData(val_GT)
-    test_data = TemporalData(test_GT)
+    val_data = TemporalData(val_GT, verbose=False)
+    test_data = TemporalData(test_GT, verbose=False)
     
-    sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
+    sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density).to(device)
     
     train_loader = DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
@@ -74,7 +77,7 @@ if __name__ == '__main__':
         pin_memory=torch.cuda.is_available()
     )
 
-    model = DistributedDotGAT(
+    model = DistributedDotGAT(device=device,
         input_dim=args.t * args.m,
         hidden_dim=args.hidden_dim,
         n=args.t, m=args.m,
@@ -139,7 +142,7 @@ if __name__ == '__main__':
             t1 = datetime.now()
             print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
         
-        if epoch % 50 == 0 or epoch == 1:
+        if epoch % 25 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. T loss: {train_loss:.2e} | T acc: {t_accuracy:.2f} | T % maj: {t_agreement:.2f} | V loss: {val_loss:.2e} | V acc: {val_accuracy:.2f} | V % maj: {val_agreement:.2f}")
         
         # Save connectivity matrix for visualization

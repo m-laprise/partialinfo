@@ -1,4 +1,3 @@
-import math
 from typing import Union
 
 import networkx as nx
@@ -15,45 +14,57 @@ class Swish(nn.Module):
     
 
 class DotGATHead(nn.Module):
-    def __init__(self, in_features: int, out_features: int, dropout: float = 0, heads: int = 4):
+    def __init__(self, 
+                 num_agents: int, in_features: int, out_features: int, 
+                 dropout: float = 0, heads: int = 4):
         super().__init__()
         self.heads = heads
-        self.q_proj = nn.Linear(in_features, out_features, bias=False)
-        self.k_proj = nn.Linear(in_features, out_features, bias=False)
+        self.q_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
+        self.k_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
         self.v_proj = nn.Linear(in_features, out_features, bias=False)
         
-        self.forward_proj = nn.Sequential(
-            nn.LayerNorm(out_features), 
-            nn.Linear(out_features, out_features), Swish(),
-            nn.Linear(out_features, out_features), Swish()
-        )
+        #self.forward_proj = nn.Sequential(
+        #    nn.LayerNorm(out_features), nn.Linear(out_features, out_features),
+        #)
+        self.W_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features, out_features)))
+        nn.init.kaiming_uniform_(self.W_fwd, a=0.5)
+        self.bias_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features)))
+        nn.init.kaiming_uniform_(self.bias_fwd, a=0.5)
         
+        self.activation = Swish()
         self.norm = nn.LayerNorm(out_features)
         self.dropout = dropout
-        self.scale = math.sqrt(out_features)
+    
+    def _QKVmatrices(self, x: torch.Tensor):
+        # x: [batch_size, num_agents, hidden_dim]
+        B, A, _ = x.shape
+        Q = [self.q_projs[i](x[:, i, :]) for i in range(A)]
+        Q = torch.stack(Q, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
+        K = [self.k_projs[i](x[:, i, :]) for i in range(A)]
+        K = torch.stack(K, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
+        V = self.v_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
+        return Q, K, V
     
     def forward(self, x: torch.Tensor, connectivity: torch.Tensor) -> torch.Tensor:
         # x: [batch_size, num_agents, hidden_dim]
         B, A, H = x.shape
-        connectivity = connectivity.to(x.device)
-        x = self.norm(x)
-
-        # Compute query, key, and value matrices
-        Q = self.q_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
-        K = self.k_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
-        V = self.v_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
-
         dropout = self.dropout if self.training else 0
+        connectivity = connectivity.to(x.device)
+        
+        x = self.norm(x)
+        Q, K, V = self._QKVmatrices(x)
         out = F.scaled_dot_product_attention(Q, K, V, is_causal=False, 
                                              attn_mask=connectivity, dropout_p=dropout)
+        
         out = out.transpose(1,2).reshape(B, A, -1)
-        out = self.forward_proj(out)
-        return self.norm(out)
+        out = self.norm(out)
+        out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.bias_fwd.repeat(B, 1, 1)
+        return self.activation(out)
 
 
 class DistributedDotGAT(nn.Module):
     def __init__(
-        self, 
+        self, device,
         input_dim: int, # also n x m if vectorized
         hidden_dim: int, # internal dim, e.g. 128
         n: int,
@@ -74,7 +85,6 @@ class DistributedDotGAT(nn.Module):
         self.dropout = dropout
         self.adjacency_mode = adjacency_mode
         
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.sensing_masks = sensing_masks
         self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
         nn.init.kaiming_uniform_(self.W_embed, a=0.5)
@@ -83,7 +93,8 @@ class DistributedDotGAT(nn.Module):
         self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
         
         if message_steps > 0:
-            self.gat_head = DotGATHead(hidden_dim, hidden_dim, dropout=dropout, heads=num_heads)
+            self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
+                                       dropout=dropout, heads=num_heads)
 
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)

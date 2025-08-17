@@ -35,7 +35,6 @@ if __name__ == '__main__':
     parser.add_argument('--m', type=int, default=32, help='Number of columns in each ground truth matrix')
     parser.add_argument('--r', type=int, default=2, help='Rank of each ground truth matrix')
     parser.add_argument('--density', type=float, default=0.5, help='Target proportion of known entries in each ground truth matrix')
-    parser.add_argument('--sigma', type=float, default=0.0, help='Noise level in each ground truth matrix')
     parser.add_argument('--num_agents', type=int, default=30, help='Number of agents')
     # Model hyperparameters
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension of the model')
@@ -58,9 +57,9 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    train_GT = GTMatrices(num_matrices=args.train_n, t=args.t, m=args.m, r=args.r)
-    val_GT = GTMatrices(num_matrices=args.val_n, t=args.t, m=args.m, r=args.r)
-    test_GT = GTMatrices(num_matrices=args.test_n, t=args.t, m=args.m, r=args.r)
+    train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r)
+    val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r)
+    test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r)
     
     train_data = TemporalData(train_GT)
     val_data = TemporalData(val_GT, verbose=False)
@@ -142,7 +141,7 @@ if __name__ == '__main__':
             t1 = datetime.now()
             print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
         
-        if epoch % 25 == 0 or epoch == 1:
+        if epoch % 10 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. T loss: {train_loss:.2e} | T acc: {t_accuracy:.2f} | T % maj: {t_agreement:.2f} | V loss: {val_loss:.2e} | V acc: {val_accuracy:.2f} | V % maj: {val_agreement:.2f}")
         
         # Save connectivity matrix for visualization

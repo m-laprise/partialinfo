@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "gprof2dot>=2025.4.14",
+    "graphviz>=0.21",
     "matplotlib>=3.9.0",
     "networkx>=3.2.1",
     "pandas>=2.2.3",

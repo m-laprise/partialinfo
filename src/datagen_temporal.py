@@ -282,7 +282,7 @@ class SensingMasks(object):
         _build_agent_masks(): Build masks for each agent.
         _summary(): Print summary of the generated masks.
     """
-    def __init__(self, TemporalData, rank, num_agents, density):
+    def __init__(self, TemporalData, rank, num_agents, density, *, future_only: bool = True):
         self.num_matrices = len(TemporalData)
         self.num_agents = num_agents
         self.density = density
@@ -293,6 +293,7 @@ class SensingMasks(object):
             "agent_overlap": [], "agent_endowments": [],
             "actual_knowns": [], "oversample_flags": 0
         }
+        self.future_only = future_only
         self.masks, self.global_known = self._generate()
         
     def to(self, device):
@@ -344,13 +345,18 @@ class SensingMasks(object):
         global_known_indices = all_indices[:global_known_count]
         global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
         global_mask[global_known_indices] = True
+        if self.future_only:
+            # Hide the entire last row
+            global_mask[-self.m:] = False
+            keep = global_known_indices < self.total_entries - self.m
+            global_known_indices = global_known_indices[keep]
         return global_mask, global_known_indices
 
     def _robust_sample_global_known_idx(self, max_attempts: int = 20, verbose: bool = True):
         for attempt in range(1, max_attempts + 1):
             global_mask, global_known_idx = self._sample_global_known_idx()
             mask_2d = global_mask.view(self.t, self.m)
-            rows_ok = (mask_2d.sum(dim=1) >= 3).all()
+            rows_ok = (mask_2d[:-1, :].sum(dim=1) >= 3).all()
             cols_ok = (mask_2d.sum(dim=0) >= 3).all()
             if rows_ok and cols_ok:
                 return global_known_idx
@@ -398,7 +404,7 @@ class SensingMasks(object):
 
 
 #=========#
-
+"""
 NUM_MATRICES = 1000
 NUM_AGENTS = 125
 T = 100
@@ -437,7 +443,7 @@ axs[2].set_ylabel("Time")
 fig.suptitle(
     f"Example data point: {T} by {M} matrix of rank {R}, Sampling = {sensingmasks.density}", fontsize=14)
 fig.tight_layout()
-gitplt.show()
+plt.show()
 
 from torch.utils.data import DataLoader
 
@@ -447,3 +453,4 @@ train_loader = DataLoader(
     )
 
 print("...")
+"""

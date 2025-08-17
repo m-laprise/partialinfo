@@ -17,7 +17,7 @@ def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_
 
     # Hyperparameter groups
     grouped_hparams = {
-        "Ground Truth and Sensing Hyperparameters": ['t', 'm', 'r', 'density', 'sigma', 'num_agents'],
+        "Ground Truth and Sensing Hyperparameters": ['t', 'm', 'r', 'density', 'num_agents'],
         "Model Hyperparameters": ['hidden_dim'],
         "Message Passing Hyperparameters": ['att_heads', 'adjacency_mode', 'steps'],
         "Training Hyperparameters": ['dropout', 'lr', 'epochs', 'batch_size', 'patience', 'train_n', 'val_n', 'test_n']

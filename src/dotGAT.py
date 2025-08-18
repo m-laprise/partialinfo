@@ -8,59 +8,105 @@ import torch.nn.functional as F
 from datagen_temporal import SensingMasks
 
 
-class Swish(nn.Module):
-    def forward(self, x):
-        return x * torch.sigmoid(x)
-    
-
 class DotGATHead(nn.Module):
+    """
+    Fused and vectorised distributed attention-message-passing for all agents and all attention head.
+    Shapes:
+        x          : [B, A, Din]
+        W_q / W_k  : [A, Din, H*Dh]  (H = #heads, Dh = out_per_head)
+        W_v        : [Din, H*Dh]     (shared across agents)
+    """
     def __init__(self, 
                  num_agents: int, in_features: int, out_features: int, 
                  dropout: float = 0, heads: int = 4):
         super().__init__()
+        assert out_features % heads == 0
         self.heads = heads
-        self.q_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
-        self.k_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
-        self.v_proj = nn.Linear(in_features, out_features, bias=False)
+        self.head_dim = out_features // heads
         
-        #self.forward_proj = nn.Sequential(
-        #    nn.LayerNorm(out_features), nn.Linear(out_features, out_features),
-        #)
-        self.W_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features, out_features)))
+        #self.q_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
+        #self.k_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
+        #self.v_proj = nn.Linear(in_features, out_features, bias=False)
+        
+        #self.W_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features, out_features)))
+        #nn.init.kaiming_uniform_(self.W_fwd, a=0.5)
+        #self.bias_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features)))
+        #nn.init.kaiming_uniform_(self.bias_fwd, a=0.5)
+        
+        #self.activation = Swish()
+        #self.norm = nn.LayerNorm(out_features)
+        #self.dropout = dropout
+        
+        # batched weights: one slice per agent
+        self.W_q = nn.Parameter(torch.empty(num_agents, in_features, self.heads * self.head_dim))
+        self.W_k = nn.Parameter(torch.empty_like(self.W_q))
+        nn.init.kaiming_uniform_(self.W_q,  a=0.5)
+        nn.init.kaiming_uniform_(self.W_k,  a=0.5)
+        # Shared V
+        self.W_v = nn.Linear(in_features, self.heads * self.head_dim, bias=False)
+
+        self.W_fwd  = nn.Parameter(torch.empty(num_agents, out_features, out_features))
+        self.b_fwd  = nn.Parameter(torch.empty(num_agents, out_features))
         nn.init.kaiming_uniform_(self.W_fwd, a=0.5)
-        self.bias_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features)))
-        nn.init.kaiming_uniform_(self.bias_fwd, a=0.5)
-        
-        self.activation = Swish()
-        self.norm = nn.LayerNorm(out_features)
+        nn.init.kaiming_uniform_(self.b_fwd, a=0.5)
+
+        self.norm   = nn.LayerNorm(out_features)
+        self.act    = nn.SiLU()            # fused Swish
         self.dropout = dropout
     
-    def _QKVmatrices(self, x: torch.Tensor):
-        # x: [batch_size, num_agents, hidden_dim]
-        B, A, _ = x.shape
-        Q = [self.q_projs[i](x[:, i, :]) for i in range(A)]
-        Q = torch.stack(Q, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
-        K = [self.k_projs[i](x[:, i, :]) for i in range(A)]
-        K = torch.stack(K, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
-        V = self.v_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
-        return Q, K, V
-    
-    def forward(self, x: torch.Tensor, connectivity: torch.Tensor) -> torch.Tensor:
-        # x: [batch_size, num_agents, hidden_dim]
-        B, A, H = x.shape
-        dropout = self.dropout if self.training else 0
-        connectivity = connectivity.to(x.device)
-        
-        x = self.norm(x)
-        Q, K, V = self._QKVmatrices(x)
-        out = F.scaled_dot_product_attention(Q, K, V, is_causal=False, 
-                                             attn_mask=connectivity, dropout_p=dropout)
-        
-        out = out.transpose(1,2).reshape(B, A, -1)
-        out = self.norm(out)
-        out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.bias_fwd.repeat(B, 1, 1)
-        return self.activation(out)
+    # def _QKVmatrices(self, x: torch.Tensor):
+    #     # x: [batch_size, num_agents, hidden_dim]
+    #     B, A, _ = x.shape
+    #     Q = [self.q_projs[i](x[:, i, :]) for i in range(A)]
+    #     Q = torch.stack(Q, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
+    #     K = [self.k_projs[i](x[:, i, :]) for i in range(A)]
+    #     K = torch.stack(K, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
+    #     V = self.v_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
+    #     return Q, K, V
+    def _project_qkv(self, x: torch.Tensor):
+        # x: [B, A, Din]
+        # einsum → single GEMM for all agents
+        # result: [B, A, H*Dh]
+        q = torch.einsum('bad,adh->bah', x, self.W_q)
+        k = torch.einsum('bad,adh->bah', x, self.W_k)
+        v = self.W_v(x)                                 # shared proj
 
+        # reshape for scaled_dot_product_attention
+        B, A, _ = q.shape
+        q = q.view(B, A, self.heads, self.head_dim).transpose(1, 2)  # [B, H, A, Dh]
+        k = k.view(B, A, self.heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, A, self.heads, self.head_dim).transpose(1, 2)
+        return q, k, v   
+    
+    #def forward(self, x: torch.Tensor, connectivity: torch.Tensor) -> torch.Tensor:
+        # # x: [batch_size, num_agents, hidden_dim]
+        # B, A, H = x.shape
+        # dropout = self.dropout if self.training else 0
+        # connectivity = connectivity.to(x.device)
+        
+        # x = self.norm(x)
+        # Q, K, V = self._QKVmatrices(x)
+        # out = F.scaled_dot_product_attention(Q, K, V, is_causal=False, 
+        #                                      attn_mask=connectivity, dropout_p=dropout)
+        
+        # out = out.transpose(1,2).reshape(B, A, -1)
+        # out = self.norm(out)
+        # out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.bias_fwd.repeat(B, 1, 1)
+        # return self.activation(out)
+    def forward(self, x: torch.Tensor, connect: torch.Tensor):
+        # x: [B, A, Din];   connect: [A, A] or [1, A, A]
+        x = self.norm(x)                                        # pre-norm
+        q, k, v = self._project_qkv(x)
+        dropout_p = self.dropout if self.training else 0.0
+
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=connect.to(x.device), dropout_p=dropout_p
+        )                                                       # [B, H, A, Dh]
+        out = out.transpose(1, 2).reshape(x.size(0), -1, self.heads * self.head_dim)
+        out = self.norm(out)                                    # post-norm
+        # fused forward projection (one GEMM via einsum); broadcast the bias
+        out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.b_fwd.unsqueeze(0)
+        return self.act(out)
 
 class DistributedDotGAT(nn.Module):
     def __init__(
@@ -239,7 +285,7 @@ class CollectiveClassifier(nn.Module):
         self.output_dim = m
         self.W_decode = nn.Parameter(torch.empty(size=(num_agents, agent_outputs_dim, m)))
         nn.init.kaiming_uniform_(self.W_decode, a=0.5)
-        self.activation = Swish()
+        self.activation = nn.SiLU()
         self.norm_in = nn.LayerNorm(agent_outputs_dim)
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:

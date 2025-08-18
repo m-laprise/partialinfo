@@ -8,6 +8,7 @@ Next steps:
 
 import argparse
 import gc
+import os
 from datetime import datetime
 
 import torch
@@ -43,19 +44,24 @@ if __name__ == '__main__':
     parser.add_argument('--adjacency_mode', type=str, default='learned', choices=['none', 'learned'], help='Whether adjacency matrix for message-passing is all-to-all or learned')
     parser.add_argument('--steps', type=int, default=5, help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     # Training hyperparameters
-    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout probability during training')
+    parser.add_argument('--dropout', type=float, default=0.0, help='Dropout probability during training')
     parser.add_argument('--lr', type=float, default=0.001, help='Initial learning rate')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
     parser.add_argument('--patience', type=int, default=0, help='Early stopping patience')
-    parser.add_argument('--train_n', type=int, default=500, help='Number of training matrices')
-    parser.add_argument('--val_n', type=int, default=100, help='Number of validation matrices')
-    parser.add_argument('--test_n', type=int, default=100, help='Number of test matrices')
+    parser.add_argument('--train_n', type=int, default=800, help='Number of training matrices')
+    parser.add_argument('--val_n', type=int, default=200, help='Number of validation matrices')
+    parser.add_argument('--test_n', type=int, default=200, help='Number of test matrices')
     
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    if torch.cuda.is_available():
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"CUDNN version: {torch.backends.cudnn.version()}")
+        torch.backends.cudnn.benchmark = True
     
     train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r)
     val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r)
@@ -67,13 +73,19 @@ if __name__ == '__main__':
     
     sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density).to(device)
     
+    num_workers = os.cpu_count() // 2 if torch.cuda.is_available() else 0
+    print(f"Number of workers: {num_workers}")
     train_loader = DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
         pin_memory=torch.cuda.is_available(), 
+        num_workers=num_workers,
+        persistent_workers=True if num_workers > 0 else False
     )
     val_loader = DataLoader(
         val_data, batch_size=args.batch_size, 
-        pin_memory=torch.cuda.is_available()
+        pin_memory=torch.cuda.is_available(),
+        num_workers=num_workers,
+        persistent_workers=True if num_workers > 0 else False
     )
 
     model = DistributedDotGAT(device=device,
@@ -97,6 +109,10 @@ if __name__ == '__main__':
     count_parameters(aggregator)
     print("--------------------------")
     
+    print("Compiling model and aggregator with torch.compile...")
+    model = torch.compile(model)
+    aggregator = torch.compile(aggregator)
+    print("torch.compile done.")
     
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
@@ -182,16 +198,24 @@ if __name__ == '__main__':
     plot_classif(stats, file_base, random_accuracy)
     
     # Final test evaluation on fresh data
-
-    test_loader = DataLoader(test_data, batch_size=args.batch_size)
+    test_loader = DataLoader(
+        test_data, batch_size=args.batch_size, 
+        pin_memory=torch.cuda.is_available(),
+        num_workers=num_workers, 
+        persistent_workers=True if num_workers > 0 else False
+    )
     test_loss, test_accuracy, test_agreement = evaluate(
         model, aggregator, test_loader, criterion, 
         args.t, args.m, args.r, device, tag="test"
     )
-    print(f"Test Set Performance | Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}, % maj: {test_agreement:.2f}")
+    print(
+        f"Test Set Performance | Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}, % maj: {test_agreement:.2f}")
 
-
-    log_training_run(file_base, args, stats, test_loss, test_accuracy, test_agreement, start, end, model, aggregator)
+    log_training_run(
+        file_base, args, stats, 
+        test_loss, test_accuracy, test_agreement, 
+        start, end, model, aggregator
+    )
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
     

@@ -222,7 +222,10 @@ class TemporalData(Dataset):
     def __summary(self):
         # TO DEBUG
         S = torch.linalg.svdvals(self.data)
-        gap = np.mean((S[:, self.r - 1] - S[:, self.r]).tolist())
+        if self.r < min(self.t, self.m):
+            gap = np.mean((S[:, self.r - 1] - S[:, self.r]).tolist())
+        else:
+            gap = 0.0
         nuc = np.mean(S.sum(dim=1).tolist())
         var = np.mean(self.data.var(dim=1).tolist())
         if self.verbose:
@@ -353,21 +356,26 @@ class SensingMasks(object):
         return global_mask, global_known_indices
 
     def _robust_sample_global_known_idx(self, max_attempts: int = 20, verbose: bool = True):
-        for attempt in range(1, max_attempts + 1):
-            global_mask, global_known_idx = self._sample_global_known_idx()
-            mask_2d = global_mask.view(self.t, self.m)
-            rows_ok = (mask_2d[:-1, :].sum(dim=1) >= 3).all()
-            cols_ok = (mask_2d.sum(dim=0) >= 3).all()
-            if rows_ok and cols_ok:
-                return global_known_idx
-            if verbose and attempt < max_attempts:
-                print(f"Warning: Retrying sampling (attempt {attempt}) due to sparse rows/cols.")
-        raise RuntimeError(
-            f"Failed to sample a valid mask after {max_attempts} attempts. "
-            f"Could not ensure at least {self.r} known entries in each row and column. "
-            f"Density: {self.density}, size: {self.t}x{self.m}"
-        )
-
+        if self.r <= min(self.m, self.t) // 2:
+            for attempt in range(1, max_attempts + 1):
+                global_mask, global_known_idx = self._sample_global_known_idx()
+                mask_2d = global_mask.view(self.t, self.m)
+                rows_ok = (mask_2d[:-1, :].sum(dim=1) >= self.r).all()
+                cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
+                if rows_ok and cols_ok:
+                    return global_known_idx
+                if verbose and attempt < max_attempts:
+                    print(f"Warning: Retrying sampling (attempt {attempt}) due to sparse rows/cols.")
+            raise RuntimeError(
+                f"Failed to sample a valid mask after {max_attempts} attempts. "
+                f"Could not ensure at least {self.r} known entries in each row and column. "
+                f"Density: {self.density}, size: {self.t}x{self.m}"
+            )
+        else:
+            _, global_known_idx = self._sample_global_known_idx()
+            print("Warning: matrices are not low-rank. r is high compared to t or m.")
+            return global_known_idx
+            
     def _agent_samplesizes(self, num_global_known: int):
         base = max(1, num_global_known // self.num_agents)
         low = min(int(2.0 * base), num_global_known)

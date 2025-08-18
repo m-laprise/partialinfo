@@ -73,6 +73,7 @@ def train(model, aggregator, loader, optimizer, criterion,
     model.train()
     total_loss = 0
     for batch in loader:
+        torch.compiler.cudagraph_mark_step_begin()
         optimizer.zero_grad(set_to_none=True)
 
         x = batch['matrix'].to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]

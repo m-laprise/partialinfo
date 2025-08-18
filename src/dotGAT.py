@@ -75,7 +75,8 @@ class DotGATHead(nn.Module):
 
 class TrainableSmallWorld(nn.Module):
     """
-    Additive attention-bias matrix for DotGAT, shape [1, A, A].
+    Additive attention-bias matrix for DotGAT.
+    Only non-frozen positions become nn.Parameters.
 
     • Non-frozen entries are a learnt parameter vector → scattered every fwd pass  
     • Frozen entries are hard −∞ (so the kernel never attends to them)  
@@ -95,52 +96,55 @@ class TrainableSmallWorld(nn.Module):
         # adjacency of a small-world graph
         G = nx.watts_strogatz_graph(A, k, p)
         adj = torch.tensor(nx.to_numpy_array(G), dtype=torch.bool, device=device)  # [A,A]
-        # Freeze permanently a portion of the *zero* entries
+        # Choose a portion of the *zero* entries to freeze permanently
         zeros = (~adj).nonzero(as_tuple=False)          # list of absent edges
         n_freeze = int(math.ceil(len(zeros) * freeze_frac))
         frozen_idx = zeros[torch.randperm(len(zeros))[:n_freeze]]
-        frozen_mask = torch.ones(A, A, dtype=torch.bool, device=device)
-        frozen_mask[frozen_idx[:, 0], frozen_idx[:, 1]] = False  # False = frozen −∞
-        if symmetric:                                            # keep symmetry
-            frozen_mask &= frozen_mask.t()
-        # build an index list for learnable parameters
-        learnable_idx = (~frozen_mask).nonzero(as_tuple=False)   # 2-col [[i,j]…]
-        self.register_buffer("frozen_mask", frozen_mask)         # True → learnable
+        # Boolean mask: True -> learnable, False -> frozen (-∞)
+        learn_mask = torch.ones(A, A, dtype=torch.bool, device=device)
+        learn_mask[frozen_idx[:, 0], frozen_idx[:, 1]] = False
+        if symmetric:
+            # out-of-place logical-and avoids aliasing error
+            learn_mask = learn_mask & learn_mask.T
+        # list learnable parameters
+        learnable_idx = learn_mask.nonzero(as_tuple=False)
         self.register_buffer("learn_row",  learnable_idx[:, 0])
         self.register_buffer("learn_col",  learnable_idx[:, 1])
-        # one 1-D Parameter holds *all* trainable biases
-        init_val   = torch.zeros(len(learnable_idx), device=device)
-        # give original edges a head-start; other learnable zeros start near 0
-        init_val[adj[self.learn_row, self.learn_col]] = 3.0
-        self.bias_param = nn.Parameter(init_val)
+        # single 1-D parameter for the trainable biases
+        init = torch.zeros(len(learnable_idx), device=device)
+        init[adj[self.learn_row, self.learn_col]] = 3.0             # warm-start real edges
+        self.bias_param = nn.Parameter(init)
+        # keep the mask for inspection
+        self.register_buffer("learn_mask", learn_mask)
 
     def forward(self) -> torch.Tensor:
         """
-        Returns an additive bias matrix suitable for `scaled_dot_product_attention`:
-            -∞  on frozen entries, (learned value) elsewhere.
-        Shape [1, A, A]  (broadcasted over batch & heads).
+        Returns an additive bias matrix for `scaled_dot_product_attention`:
+            (-∞  on frozen entries, shape [1, A, A] broadcasted over batch & heads).
         """
-        A, dev = self.A, self.bias_param.device
-        bias   = torch.full((A, A), float('-inf'), device=dev)   # start all −∞
+        bias = torch.full((self.A, self.A),
+                          float('-inf'),
+                          device=self.bias_param.device)
         bias[self.learn_row, self.learn_col] = self.bias_param
-        if self.symmetric:
-            bias = torch.maximum(bias, bias.t())                 # keep symmetry
-        return bias.unsqueeze(0)                                 # [1,A,A]
+        if self.symmetric:                                           # keep symmetry
+            bias = torch.maximum(bias, bias.T)
+        return bias.unsqueeze(0)
+
 
 class DistributedDotGAT(nn.Module):
     def __init__(
-        self, device,
+        self, device, *,
         input_dim: int, # also n x m if vectorized
         hidden_dim: int, # internal dim, e.g. 128
-        n: int,
-        m: int,
-        num_agents: int,
+        n: int, m: int, 
+        num_agents: int, 
         num_heads: int,
         dropout: float,
-        adjacency_mode: str = 'none',
-        message_steps: int = 3,
+        adjacency_mode: str,
+        message_steps: int,
         sensing_masks: Union[None, SensingMasks] = None,
-        k: int = 10, p: float = 0.3, freeze_zero_frac: float = 0.5
+        k: int = 10, p: float = 0.3, 
+        freeze_zero_frac: float = 0.5
     ):
         super().__init__()
         self.output_dim = n * m
@@ -151,11 +155,9 @@ class DistributedDotGAT(nn.Module):
         self.dropout = dropout
         self.adjacency_mode = adjacency_mode        
         self.sensing_masks = sensing_masks
-        
         self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
         nn.init.kaiming_uniform_(self.W_embed, a=0.5)
         self.norm = nn.LayerNorm(hidden_dim)
-     
         if self.message_steps > 0:
             self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
                                        dropout=dropout, heads=num_heads)

@@ -89,7 +89,7 @@ if __name__ == '__main__':
     )
 
     model = DistributedDotGAT(device=device,
-        input_dim=args.t * args.m,
+        input_dim=args.t * args.m, 
         hidden_dim=args.hidden_dim,
         n=args.t, m=args.m,
         num_agents=args.num_agents,

@@ -6,6 +6,7 @@ from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 from torch.utils.data import Dataset
 
 
+@torch.no_grad()
 def matern_covariance(t: int,
                       length_scale: float,
                       nu: float,
@@ -24,7 +25,7 @@ def matern_covariance(t: int,
     np.fill_diagonal(vcov, vcov.diagonal() + jitter)
     return torch.as_tensor(vcov)
 
-
+@torch.no_grad()
 def _random_ts_params(mode: int, *, nu_low: float = 0.5, nu_high: float = 8.0) -> Tuple[float, float]:
     """
     Generate random time series parameters for slow, medium, or fast dynamics.
@@ -49,7 +50,7 @@ def _even_partition(total: int, k: int) -> List[int]:
     base, extra = divmod(total, k)
     return [base + (i < extra) for i in range(k)]
 
-
+@torch.no_grad()
 def _generate_V(r: int,
                 m: int,
                 row_sizes: List[int],
@@ -95,7 +96,7 @@ def _generate_V(r: int,
     V = torch.softmax(logits, dim=0) 
     return V.T
 
-
+@torch.no_grad()
 def _generate_DGP(t: int, m: int, r: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Define a random data-generating process comprised of the following parameters:
@@ -115,7 +116,7 @@ def _generate_DGP(t: int, m: int, r: int) -> Tuple[torch.Tensor, torch.Tensor]:
     V = _generate_V(r, m, block_sizes)
     return vcovU, V
 
-
+@torch.no_grad()
 def _gen_U_col(vcovU: torch.Tensor, *, offset: float = 2.0) -> torch.Tensor:
     t = vcovU.shape[1]
     mvn = torch.distributions.MultivariateNormal(
@@ -127,7 +128,7 @@ def _gen_U_col(vcovU: torch.Tensor, *, offset: float = 2.0) -> torch.Tensor:
     U_col = mvn.rsample() 
     return U_col
 
-
+@torch.no_grad()
 def _generate_U(vcovsU: torch.Tensor, *, offset: float = 2.0):
     r, t, _ = vcovsU.shape
     U = torch.zeros(t, r)
@@ -135,7 +136,7 @@ def _generate_U(vcovsU: torch.Tensor, *, offset: float = 2.0):
         U[:, col] = _gen_U_col(vcovsU[col], offset=offset)
     return U
 
-        
+@torch.no_grad()
 class GTMatrices(Dataset):
     def __init__(self, 
                  N: int,                    # Number of examples M = U @ V.T

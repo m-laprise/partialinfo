@@ -73,19 +73,19 @@ if __name__ == '__main__':
     
     sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density).to(device)
     
-    num_workers = os.cpu_count() // 2 if torch.cuda.is_available() else 0
-    print(f"Number of workers: {num_workers}")
+    #num_workers = os.cpu_count() // 2 if torch.cuda.is_available() else 0
+    #print(f"Number of workers: {num_workers}")
     train_loader = DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
         pin_memory=torch.cuda.is_available(), 
-        num_workers=num_workers,
-        persistent_workers=True if num_workers > 0 else False
+        #num_workers=num_workers,
+        #persistent_workers=True if num_workers > 0 else False
     )
     val_loader = DataLoader(
         val_data, batch_size=args.batch_size, 
         pin_memory=torch.cuda.is_available(),
-        num_workers=num_workers,
-        persistent_workers=True if num_workers > 0 else False
+        #num_workers=num_workers,
+        #persistent_workers=True if num_workers > 0 else False
     )
 
     model = DistributedDotGAT(device=device,
@@ -201,8 +201,8 @@ if __name__ == '__main__':
     test_loader = DataLoader(
         test_data, batch_size=args.batch_size, 
         pin_memory=torch.cuda.is_available(),
-        num_workers=num_workers, 
-        persistent_workers=True if num_workers > 0 else False
+        #num_workers=num_workers, 
+        #persistent_workers=True if num_workers > 0 else False
     )
     test_loss, test_accuracy, test_agreement = evaluate(
         model, aggregator, test_loader, criterion, 

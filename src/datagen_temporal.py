@@ -136,8 +136,9 @@ def _generate_U(vcovsU: torch.Tensor, *, offset: float = 2.0):
         U[:, col] = _gen_U_col(vcovsU[col], offset=offset)
     return U
 
-@torch.no_grad()
+
 class GTMatrices(Dataset):
+    @torch.no_grad()
     def __init__(self, 
                  N: int,                    # Number of examples M = U @ V.T
                  t: int, m: int, r: int,    # M is a t by m matrix of rank r

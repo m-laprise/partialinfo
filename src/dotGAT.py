@@ -5,7 +5,7 @@ import networkx as nx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.backends.cuda import SDPBackend, sdpa_kernel
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from datagen_temporal import SensingMasks
 

@@ -1,3 +1,4 @@
+import math
 from typing import Union
 
 import networkx as nx
@@ -24,19 +25,6 @@ class DotGATHead(nn.Module):
         self.heads = heads
         self.head_dim = out_features // heads
         
-        #self.q_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
-        #self.k_projs = nn.ModuleList([nn.Linear(in_features, out_features, bias=False) for _ in range(num_agents)])
-        #self.v_proj = nn.Linear(in_features, out_features, bias=False)
-        
-        #self.W_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features, out_features)))
-        #nn.init.kaiming_uniform_(self.W_fwd, a=0.5)
-        #self.bias_fwd = nn.Parameter(torch.empty(size=(num_agents, out_features)))
-        #nn.init.kaiming_uniform_(self.bias_fwd, a=0.5)
-        
-        #self.activation = Swish()
-        #self.norm = nn.LayerNorm(out_features)
-        #self.dropout = dropout
-        
         # batched weights: one slice per agent
         self.W_q = nn.Parameter(torch.empty(num_agents, in_features, self.heads * self.head_dim))
         self.W_k = nn.Parameter(torch.empty_like(self.W_q))
@@ -54,15 +42,6 @@ class DotGATHead(nn.Module):
         self.act    = nn.SiLU()            # fused Swish
         self.dropout = dropout
     
-    # def _QKVmatrices(self, x: torch.Tensor):
-    #     # x: [batch_size, num_agents, hidden_dim]
-    #     B, A, _ = x.shape
-    #     Q = [self.q_projs[i](x[:, i, :]) for i in range(A)]
-    #     Q = torch.stack(Q, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
-    #     K = [self.k_projs[i](x[:, i, :]) for i in range(A)]
-    #     K = torch.stack(K, dim=1).view(B, A, self.heads, -1).transpose(1, 2)
-    #     V = self.v_proj(x).view(B, A, self.heads, -1).transpose(1, 2)
-    #     return Q, K, V
     def _project_qkv(self, x: torch.Tensor):
         # x: [B, A, Din]
         # einsum → single GEMM for all agents
@@ -78,21 +57,6 @@ class DotGATHead(nn.Module):
         v = v.view(B, A, self.heads, self.head_dim).transpose(1, 2)
         return q, k, v   
     
-    #def forward(self, x: torch.Tensor, connectivity: torch.Tensor) -> torch.Tensor:
-        # # x: [batch_size, num_agents, hidden_dim]
-        # B, A, H = x.shape
-        # dropout = self.dropout if self.training else 0
-        # connectivity = connectivity.to(x.device)
-        
-        # x = self.norm(x)
-        # Q, K, V = self._QKVmatrices(x)
-        # out = F.scaled_dot_product_attention(Q, K, V, is_causal=False, 
-        #                                      attn_mask=connectivity, dropout_p=dropout)
-        
-        # out = out.transpose(1,2).reshape(B, A, -1)
-        # out = self.norm(out)
-        # out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.bias_fwd.repeat(B, 1, 1)
-        # return self.activation(out)
     def forward(self, x: torch.Tensor, connect: torch.Tensor):
         # x: [B, A, Din];   connect: [A, A] or [1, A, A]
         x = self.norm(x)                                        # pre-norm
@@ -108,6 +72,61 @@ class DotGATHead(nn.Module):
         out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.b_fwd.unsqueeze(0)
         return self.act(out)
 
+
+class TrainableSmallWorld(nn.Module):
+    """
+    Additive attention-bias matrix for DotGAT, shape [1, A, A].
+
+    • Non-frozen entries are a learnt parameter vector → scattered every fwd pass  
+    • Frozen entries are hard −∞ (so the kernel never attends to them)  
+    • Initial edges are pre-wired with a positive bias (~3 -> sigmoid ~0.95)  
+
+    Arguments:
+    A               : #agents (nodes)
+    k, p            : Watts-Strogatz nearest-neighbours & rewiring prob
+    freeze_frac     : fraction **of the absent edges** to keep permanently −∞
+    symmetric       : tie (i,j) and (j,i) parameters
+    device          : CPU / CUDA
+    """
+    def __init__(self, A, device, *, k=10, p=0.3,
+                 freeze_frac=0.5, symmetric=False):
+        super().__init__()
+        self.A, self.symmetric = A, symmetric
+        # adjacency of a small-world graph
+        G = nx.watts_strogatz_graph(A, k, p)
+        adj = torch.tensor(nx.to_numpy_array(G), dtype=torch.bool, device=device)  # [A,A]
+        # Freeze permanently a portion of the *zero* entries
+        zeros = (~adj).nonzero(as_tuple=False)          # list of absent edges
+        n_freeze = int(math.ceil(len(zeros) * freeze_frac))
+        frozen_idx = zeros[torch.randperm(len(zeros))[:n_freeze]]
+        frozen_mask = torch.ones(A, A, dtype=torch.bool, device=device)
+        frozen_mask[frozen_idx[:, 0], frozen_idx[:, 1]] = False  # False = frozen −∞
+        if symmetric:                                            # keep symmetry
+            frozen_mask &= frozen_mask.t()
+        # build an index list for learnable parameters
+        learnable_idx = (~frozen_mask).nonzero(as_tuple=False)   # 2-col [[i,j]…]
+        self.register_buffer("frozen_mask", frozen_mask)         # True → learnable
+        self.register_buffer("learn_row",  learnable_idx[:, 0])
+        self.register_buffer("learn_col",  learnable_idx[:, 1])
+        # one 1-D Parameter holds *all* trainable biases
+        init_val   = torch.zeros(len(learnable_idx), device=device)
+        # give original edges a head-start; other learnable zeros start near 0
+        init_val[adj[self.learn_row, self.learn_col]] = 3.0
+        self.bias_param = nn.Parameter(init_val)
+
+    def forward(self) -> torch.Tensor:
+        """
+        Returns an additive bias matrix suitable for `scaled_dot_product_attention`:
+            -∞  on frozen entries, (learned value) elsewhere.
+        Shape [1, A, A]  (broadcasted over batch & heads).
+        """
+        A, dev = self.A, self.bias_param.device
+        bias   = torch.full((A, A), float('-inf'), device=dev)   # start all −∞
+        bias[self.learn_row, self.learn_col] = self.bias_param
+        if self.symmetric:
+            bias = torch.maximum(bias, bias.t())                 # keep symmetry
+        return bias.unsqueeze(0)                                 # [1,A,A]
+
 class DistributedDotGAT(nn.Module):
     def __init__(
         self, device,
@@ -120,7 +139,8 @@ class DistributedDotGAT(nn.Module):
         dropout: float,
         adjacency_mode: str = 'none',
         message_steps: int = 3,
-        sensing_masks: Union[None, SensingMasks] = None
+        sensing_masks: Union[None, SensingMasks] = None,
+        k: int = 10, p: float = 0.3, freeze_zero_frac: float = 0.5
     ):
         super().__init__()
         self.output_dim = n * m
@@ -129,90 +149,39 @@ class DistributedDotGAT(nn.Module):
         self.hidden_dim = hidden_dim
         self.message_steps = message_steps
         self.dropout = dropout
-        self.adjacency_mode = adjacency_mode
-        
+        self.adjacency_mode = adjacency_mode        
         self.sensing_masks = sensing_masks
+        
         self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
         nn.init.kaiming_uniform_(self.W_embed, a=0.5)
         self.norm = nn.LayerNorm(hidden_dim)
-        
-        self.connectivity = self._init_connectivity(adjacency_mode, num_agents, device)
-        
-        if message_steps > 0:
+     
+        if self.message_steps > 0:
             self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
                                        dropout=dropout, heads=num_heads)
+            if adjacency_mode == 'learned':
+                self.connect = TrainableSmallWorld(num_agents, device, k=k, p=p, freeze_frac=freeze_zero_frac)
 
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)
         
-    def _init_connectivity(self, mode: str, num_agents: int, device: torch.device) -> torch.Tensor:
-        if mode == 'none':
-            self.register_buffer("connectivity", torch.ones(num_agents, num_agents))
-            return self.connectivity
-        elif mode == 'learned':
-            G = nx.watts_strogatz_graph(n=num_agents, k=10, p=0.3)
-            A = torch.zeros(num_agents, num_agents, device=device)
-            for i, j in G.edges():
-                A[i, j] = A[j, i] = 1.0 # Ensure symmetry
-
-            # Learnable parameter initialized with small noise
-            init_adj = A + 0.01 * torch.randn(num_agents, num_agents, device=device)
-            connectivity = nn.Parameter(init_adj)
-
-            # Freeze part of the zero entries
-            mask = (A == 0).float()  # Where connections are missing
-            flat_mask = mask.view(-1)
-            candidates = (flat_mask == 1).nonzero(as_tuple=True)[0]
-            perm = torch.randperm(len(candidates), device=device)
-            num_learnable = len(candidates) // 2
-            learnable_idx = candidates[perm[:num_learnable]]
-            final_mask = torch.ones_like(flat_mask, device=device)
-            final_mask[flat_mask == 1] = 0.0  # freeze all zero-edges
-            final_mask[learnable_idx] = 1.0   # unfreeze selected
-            grad_mask = final_mask.view(num_agents, num_agents)
-            
-            # Register_buffer saves the mask on the model (not trainable)
-            self.adj_grad_mask: torch.Tensor
-            self.register_buffer('adj_grad_mask', grad_mask)
-            def gradient_mask_hook(grad):
-                return grad * self.adj_grad_mask
-            # Register_hook applies element-wise masking during backprop
-            connectivity.register_hook(gradient_mask_hook)
-            # Note: Even if the gradient is zeroed, the value might change due to weight decay or momentum.
-            # to avoid that, I define a freeze method below to call after each optimizer step.
-            self.connectivity = connectivity
-            return self.connectivity
-        else:
-            raise ValueError(f"Invalid adjacency_mode: {mode}")
-        
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
+        attn_bias = self.connect() if self.adjacency_mode == 'learned' else None
+        
         for _ in range(self.message_steps):
-            h_prev = h
-            connectivity = self.connectivity.unsqueeze(0)
-            h_new = self.gat_head(h, connectivity)
-            h = h_prev + h_new
+            h = h + self.gat_head(h, attn_bias)
         return h
     
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
         x = self.sense(x)
-
         agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W_embed)
         h = self.norm(agents_embeddings)
-
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
         if self.message_steps > 0:
             h = self._message_passing(h)
-        
         return h
-        
-    @torch.no_grad()
-    def freeze_nonlearnable(self):
-        if self.adjacency_mode == 'learned':
-            if not hasattr(self, 'adj_grad_mask'):
-                raise RuntimeError("adj_grad_mask missing.")
-            self.connectivity.data = self.connectivity.data * self.adj_grad_mask
 
 
 class ReconDecoder(nn.Module):

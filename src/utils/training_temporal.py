@@ -98,9 +98,6 @@ def train(model, aggregator, loader, optimizer, criterion,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-        # Apply structural constraints (e.g., freeze connectivity)
-        model.freeze_nonlearnable()
-
         total_loss += loss.item()
         
     return total_loss / len(loader)

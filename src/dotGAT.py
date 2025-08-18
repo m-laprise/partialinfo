@@ -5,8 +5,8 @@ import networkx as nx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
-#from torch.nn.attention import SDPBackend, sdpa_kernel
 from datagen_temporal import SensingMasks
 
 
@@ -73,16 +73,16 @@ class DotGATHead(nn.Module):
 
             # Call SDPA in a context that *forbids* the slow “math” kernel
             # Enable Flash first, fall back to Mem-Efficient if Flash is unsupported
-            #backends_ok = [SDPBackend.FLASH_ATTENTION,
-            #               SDPBackend.EFFICIENT_ATTENTION]
+            backends_ok = [SDPBackend.FLASH_ATTENTION,
+                           SDPBackend.EFFICIENT_ATTENTION]
             # (set_priority=True → Flash tried first, Efficient second)
-            #with sdpa_kernel(backends_ok, set_priority=True):
-            out = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_bias,
-                dropout_p=dropout_p,
-                is_causal=False          # graph attention, not autoregressive
-            )                            # [B, H, A, Dh]
+            with sdpa_kernel(backends_ok, set_priority=True):
+                out = F.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=attn_bias,
+                    dropout_p=dropout_p,
+                    is_causal=False          # graph attention, not autoregressive
+                )                            # [B, H, A, Dh]
         else:
             out = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_bias, dropout_p=dropout_p

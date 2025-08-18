@@ -29,6 +29,8 @@ from utils.training_temporal import (
     train,
 )
 
+torch.set_float32_matmul_precision('high')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # Ground truth and sensing hyperparameters
@@ -63,28 +65,29 @@ if __name__ == '__main__':
         print(f"CUDNN version: {torch.backends.cudnn.version()}")
         torch.backends.cudnn.benchmark = True
     
-    train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r)
-    val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r)
-    test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r)
+    with torch.no_grad():  
+        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r)
+        val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r)
+        test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r)
+        
+        train_data = TemporalData(train_GT)
+        val_data = TemporalData(val_GT, verbose=False)
+        test_data = TemporalData(test_GT, verbose=False)
     
-    train_data = TemporalData(train_GT)
-    val_data = TemporalData(val_GT, verbose=False)
-    test_data = TemporalData(test_GT, verbose=False)
-    
-    sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density).to(device)
+        sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density).to(device)
     
     #num_workers = os.cpu_count() // 2 if torch.cuda.is_available() else 0
     #print(f"Number of workers: {num_workers}")
     train_loader = DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
         pin_memory=torch.cuda.is_available(), 
-        #num_workers=num_workers,
+        num_workers=4,
         #persistent_workers=True if num_workers > 0 else False
     )
     val_loader = DataLoader(
         val_data, batch_size=args.batch_size, 
         pin_memory=torch.cuda.is_available(),
-        #num_workers=num_workers,
+        num_workers=4,
         #persistent_workers=True if num_workers > 0 else False
     )
 
@@ -110,8 +113,8 @@ if __name__ == '__main__':
     print("--------------------------")
     
     print("Compiling model and aggregator with torch.compile...")
-    model = torch.compile(model)
-    aggregator = torch.compile(aggregator)
+    model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+    aggregator = torch.compile(aggregator, mode='reduce-overhead', fullgraph=True)
     print("torch.compile done.")
     
     optimizer = torch.optim.Adam(
@@ -201,7 +204,7 @@ if __name__ == '__main__':
     test_loader = DataLoader(
         test_data, batch_size=args.batch_size, 
         pin_memory=torch.cuda.is_available(),
-        #num_workers=num_workers, 
+        num_workers=4, 
         #persistent_workers=True if num_workers > 0 else False
     )
     test_loss, test_accuracy, test_agreement = evaluate(

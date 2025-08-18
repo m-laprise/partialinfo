@@ -5,6 +5,7 @@ import networkx as nx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.backends.cuda import SDPBackend, sdpa_kernel
 
 from datagen_temporal import SensingMasks
 
@@ -57,15 +58,36 @@ class DotGATHead(nn.Module):
         v = v.view(B, A, self.heads, self.head_dim).transpose(1, 2)
         return q, k, v   
     
-    def forward(self, x: torch.Tensor, connect: torch.Tensor):
+    def forward(self, x: torch.Tensor, attn_bias: torch.Tensor | None = None):
         # x: [B, A, Din];   connect: [A, A] or [1, A, A]
         x = self.norm(x)                                        # pre-norm
         q, k, v = self._project_qkv(x)
         dropout_p = self.dropout if self.training else 0.0
 
-        out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=connect.to(x.device), dropout_p=dropout_p
-        )                                                       # [B, H, A, Dh]
+        if torch.cuda.is_available():
+            if attn_bias is not None:
+                # [A, A]  -> [1, 1, A, A] so it broadcasts to (B, H, L, S)
+                if attn_bias.ndim == 2:
+                    attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+                attn_bias = attn_bias.to(device=q.device, dtype=q.dtype)
+
+            # Call SDPA in a context that *forbids* the slow “math” kernel
+            # Enable Flash first, fall back to Mem-Efficient if Flash is unsupported
+            backends_ok = [SDPBackend.FLASH_ATTENTION,
+                           SDPBackend.EFFICIENT_ATTENTION]
+            # (set_priority=True → Flash tried first, Efficient second)
+            with sdpa_kernel(backends_ok, set_priority=True):
+                out = F.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=attn_bias,
+                    dropout_p=dropout_p,
+                    is_causal=False          # graph attention, not autoregressive
+                )                            # [B, H, A, Dh]
+        else:
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_bias, dropout_p=dropout_p
+            )                                # [B, H, A, Dh]
+            
         out = out.transpose(1, 2).reshape(x.size(0), -1, self.heads * self.head_dim)
         out = self.norm(out)                                    # post-norm
         # fused forward projection (one GEMM via einsum); broadcast the bias
@@ -89,6 +111,7 @@ class TrainableSmallWorld(nn.Module):
     symmetric       : tie (i,j) and (j,i) parameters
     device          : CPU / CUDA
     """
+    @torch.no_grad()
     def __init__(self, A, device, *, k=10, p=0.3,
                  freeze_frac=0.5, symmetric=False):
         super().__init__()
@@ -162,7 +185,8 @@ class DistributedDotGAT(nn.Module):
             self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
                                        dropout=dropout, heads=num_heads)
             if adjacency_mode == 'learned':
-                self.connect = TrainableSmallWorld(num_agents, device, k=k, p=p, freeze_frac=freeze_zero_frac)
+                self.connect = TrainableSmallWorld(num_agents, device, 
+                                                   k=k, p=p, freeze_frac=freeze_zero_frac)
 
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)

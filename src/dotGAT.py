@@ -32,15 +32,15 @@ class DotGATHead(nn.Module):
         nn.init.kaiming_uniform_(self.W_q,  a=0.5)
         nn.init.kaiming_uniform_(self.W_k,  a=0.5)
         # Shared V
-        self.W_v = nn.Linear(in_features, self.heads * self.head_dim, bias=False)
+        self.W_v = nn.Linear(in_features, self.heads * self.head_dim, bias=True)
 
         self.W_fwd  = nn.Parameter(torch.empty(num_agents, out_features, out_features))
         self.b_fwd  = nn.Parameter(torch.empty(num_agents, out_features))
         nn.init.kaiming_uniform_(self.W_fwd, a=0.5)
         nn.init.kaiming_uniform_(self.b_fwd, a=0.5)
 
-        self.norm   = nn.LayerNorm(out_features)
-        self.act    = nn.SiLU()            # fused Swish
+        self.norm1   = nn.LayerNorm(out_features)
+        self.norm2   = nn.LayerNorm(out_features)
         self.dropout = dropout
     
     def _project_qkv(self, x: torch.Tensor):
@@ -60,7 +60,7 @@ class DotGATHead(nn.Module):
     
     def forward(self, x: torch.Tensor, attn_bias: torch.Tensor | None = None):
         # x: [B, A, Din];   connect: [A, A] or [1, A, A]
-        x = self.norm(x)                                        # pre-norm
+        x = self.norm1(x)                                        # pre-norm
         q, k, v = self._project_qkv(x)
         dropout_p = self.dropout if self.training else 0.0
 
@@ -71,7 +71,7 @@ class DotGATHead(nn.Module):
                     attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
                 attn_bias = attn_bias.to(device=q.device, dtype=q.dtype)
 
-            # Call SDPA in a context that *forbids* the slow “math” kernel
+            # Call SDPA in a context that forbids the slow math kernel
             # Enable Flash first, fall back to Mem-Efficient if Flash is unsupported
             backends_ok = [SDPBackend.FLASH_ATTENTION,
                            SDPBackend.EFFICIENT_ATTENTION]
@@ -89,10 +89,10 @@ class DotGATHead(nn.Module):
             )                                # [B, H, A, Dh]
             
         out = out.transpose(1, 2).reshape(x.size(0), -1, self.heads * self.head_dim)
-        out = self.norm(out)                                    # post-norm
+        out = self.norm2(out)                                    # post-norm
         # fused forward projection (one GEMM via einsum); broadcast the bias
         out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.b_fwd.unsqueeze(0)
-        return self.act(out)
+        return out
 
 
 class TrainableSmallWorld(nn.Module):
@@ -148,7 +148,7 @@ class TrainableSmallWorld(nn.Module):
         bias = torch.full((self.A, self.A),
                           float('-inf'),
                           device=self.bias_param.device)
-        bias[self.learn_row, self.learn_col] = self.bias_param      # type: ignore
+        bias[self.learn_row, self.learn_col] = self.bias_param       # type: ignore
         if self.symmetric:                                           # keep symmetry
             bias = torch.maximum(bias, bias.T)
         return bias.unsqueeze(0)
@@ -180,7 +180,9 @@ class DistributedDotGAT(nn.Module):
         self.sensing_masks = sensing_masks
         self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
         nn.init.kaiming_uniform_(self.W_embed, a=0.5)
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.act    = nn.SiLU()            # fused Swish
         if self.message_steps > 0:
             self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
                                        dropout=dropout, heads=num_heads)
@@ -193,16 +195,19 @@ class DistributedDotGAT(nn.Module):
         
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
         attn_bias = self.connect() if self.adjacency_mode == 'learned' else None
-        
+        # convert to bool
+        if attn_bias is not None:
+            attn_bias = attn_bias >= 0.0
         for _ in range(self.message_steps):
             h = h + self.gat_head(h, attn_bias)
+            h = self.act(self.norm2(h))
         return h
     
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
         x = self.sense(x)
         agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W_embed)
-        h = self.norm(agents_embeddings)
+        h = self.norm1(agents_embeddings)
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
         if self.message_steps > 0:

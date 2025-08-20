@@ -8,6 +8,7 @@ import gc
 import os
 from datetime import datetime
 
+import matplotlib.pyplot as plt
 import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -32,14 +33,14 @@ if torch.cuda.is_available():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # Ground truth and sensing hyperparameters
-    parser.add_argument('--t', type=int, default=32, 
+    parser.add_argument('--t', type=int, default=50, 
                         help='Number of rows in each ground truth matrix')
-    parser.add_argument('--m', type=int, default=32, 
+    parser.add_argument('--m', type=int, default=25, 
                         help='Number of columns in each ground truth matrix')
-    parser.add_argument('--r', type=int, default=2, help='Rank of each ground truth matrix')
+    parser.add_argument('--r', type=int, default=25, help='Rank of each ground truth matrix')
     parser.add_argument('--density', type=float, default=0.5, 
                         help='Target proportion of known entries in each ground truth matrix')
-    parser.add_argument('--num_agents', type=int, default=30, help='Number of agents')
+    parser.add_argument('--num_agents', type=int, default=20, help='Number of agents')
     # Model hyperparameters
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension of the model')
     # Message passing hyperparameters
@@ -53,7 +54,7 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.0, help='Dropout probability during training')
     parser.add_argument('--lr', type=float, default=0.001, help='Initial learning rate')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--patience', type=int, default=0, help='Early stopping patience')
     parser.add_argument('--train_n', type=int, default=800, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=200, help='Number of validation matrices')
@@ -84,15 +85,11 @@ if __name__ == '__main__':
     print(f"Number of workers: {num_workers}")
     train_loader = DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True,
-        pin_memory=torch.cuda.is_available(), 
-        num_workers=num_workers,
-        #persistent_workers=True if num_workers > 0 else False
+        pin_memory=torch.cuda.is_available(), num_workers=num_workers,
     )
     val_loader = DataLoader(
         val_data, batch_size=args.batch_size, 
-        pin_memory=torch.cuda.is_available(),
-        num_workers=num_workers,
-        #persistent_workers=True if num_workers > 0 else False
+        pin_memory=torch.cuda.is_available(), num_workers=num_workers,
     )
 
     model = DistributedDotGAT(
@@ -140,12 +137,10 @@ if __name__ == '__main__':
         )
         scheduler.step()
         _, t_accuracy, t_agreement = evaluate(
-            model, aggregator, train_loader, criterion, 
-            args.t, args.m, args.r, device, tag="train", 
+            model, aggregator, train_loader, criterion, args.t, args.m, args.r, device, tag="train", 
         )
         val_loss, val_accuracy, val_agreement = evaluate(
-            model, aggregator, val_loader, criterion, 
-            args.t, args.m, args.r, device, tag="val"
+            model, aggregator, val_loader, criterion, args.t, args.m, args.r, device, tag="val"
         )
         
         stats["train_loss"].append(train_loss)
@@ -157,26 +152,30 @@ if __name__ == '__main__':
         
         if epoch == 1:
             t1 = datetime.now()
-            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
-        
+            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")        
         if epoch % 10 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. ",
                   f"T loss: {train_loss:.2e} | T acc: {t_accuracy:.2f} | T % maj: {t_agreement:.2f} | ",
                   f"V loss: {val_loss:.2e} | V acc: {val_accuracy:.2f} | V % maj: {val_agreement:.2f}")
         
         # Save connectivity matrix for visualization
-        #adj_matrix = model.connectivity.detach().cpu().numpy()
-        #np.save(f"{file_base}_adj_epoch{epoch}.npy", adj_matrix)
+        """netxmask = model.connect.learn_mask.detach().cpu().numpy().astype(int)
+        netx = model.connect()[0].detach().cpu().numpy()
+        netx[netx == float('-inf')] = 0.0
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        #ax[0].matshow(netxmask, cmap='gray', vmin=0, vmax=1)
+        maxv = abs(netx).max()
+        ax[1].matshow(netx, cmap='PiYG', vmin=-maxv, vmax=maxv)
+        fig.show()"""
+        #np.save(f"{file_base}_adj_epoch{epoch}.npy", netx)
         
         if val_loss < best_loss - 1e-5:
             best_loss = val_loss
             patience_counter = 0
             torch.save(model.state_dict(), checkpoint_path)
-            
             if val_accuracy == 1.0:
                 print(f"Early stopping at epoch {epoch}; accuracy on validation set is 100%.")
                 break
-  
         else:
            patience_counter += 1
            if val_loss > 10:
@@ -204,20 +203,16 @@ if __name__ == '__main__':
     # Final test evaluation on fresh data
     test_loader = DataLoader(
         test_data, batch_size=args.batch_size, 
-        pin_memory=torch.cuda.is_available(),
-        num_workers=num_workers, 
-        #persistent_workers=True if num_workers > 0 else False
+        pin_memory=torch.cuda.is_available(), num_workers=num_workers, 
     )
     test_loss, test_accuracy, test_agreement = evaluate(
-        model, aggregator, test_loader, criterion, 
-        args.t, args.m, args.r, device, tag="test"
+        model, aggregator, test_loader, criterion, args.t, args.m, args.r, device, tag="test"
     )
     print("Test Set Performance | ",
           f"Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}, % maj: {test_agreement:.2f}")
 
     log_training_run(
-        file_base, args, stats, 
-        test_loss, test_accuracy, test_agreement, 
+        file_base, args, stats, test_loss, test_accuracy, test_agreement, 
         start, end, model, aggregator
     )
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'

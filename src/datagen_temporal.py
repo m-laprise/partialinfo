@@ -22,7 +22,7 @@ def matern_covariance(t: int,
     X = np.arange(t, dtype=float).reshape(-1, 1)
     # Evaluate and stabilize (to later draw samples, need a positive-definite Σ) 
     vcov = kernel(X)              # equivalent to kernel(X, X)
-    np.fill_diagonal(vcov, vcov.diagonal() + jitter)
+    np.fill_diagonal(vcov, vcov.diagonal() + jitter) # type: ignore
     return torch.as_tensor(vcov)
 
 @torch.no_grad()
@@ -415,11 +415,11 @@ class SensingMasks(object):
 
 #=========#
 """
-NUM_MATRICES = 1000
+NUM_MATRICES = 100
 NUM_AGENTS = 125
 T = 100
-M = 50
-R = 6
+M = 25
+R = 15
 
 groundtruth = GTMatrices(NUM_MATRICES, T, M, R)
 groundtruth[:NUM_MATRICES]

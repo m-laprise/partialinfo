@@ -135,7 +135,7 @@ class TrainableSmallWorld(nn.Module):
         self.register_buffer("learn_col",  learnable_idx[:, 1])
         # single 1-D parameter for the trainable biases
         init = torch.zeros(len(learnable_idx), device=device)
-        init[adj[self.learn_row, self.learn_col]] = 3.0             # warm-start real edges
+        init[adj[self.learn_row, self.learn_col]] = 3.0        # type: ignore
         self.bias_param = nn.Parameter(init)
         # keep the mask for inspection
         self.register_buffer("learn_mask", learn_mask)
@@ -148,7 +148,7 @@ class TrainableSmallWorld(nn.Module):
         bias = torch.full((self.A, self.A),
                           float('-inf'),
                           device=self.bias_param.device)
-        bias[self.learn_row, self.learn_col] = self.bias_param
+        bias[self.learn_row, self.learn_col] = self.bias_param      # type: ignore
         if self.symmetric:                                           # keep symmetry
             bias = torch.maximum(bias, bias.T)
         return bias.unsqueeze(0)

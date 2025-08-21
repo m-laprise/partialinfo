@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=torch-test    # create a short name for your job
+#SBATCH --job-name=stepsize1e4   # create a short name for your job
 #SBATCH --nodes=1                # node count
 #SBATCH --ntasks=1               # total number of tasks across all nodes
 #SBATCH --cpus-per-task=4        # cpu-cores per task (>1 if multi-threaded tasks)
@@ -9,7 +9,7 @@
 #SBATCH --mail-type=begin        # send mail when job begins
 #SBATCH --mail-type=end          # send mail when job ends
 #SBATCH --mail-type=fail         # send mail if job fails
-#SBATCH --mail-user=<YourNetID>@princeton.edu
+#SBATCH --mail-user=mlaprise@princeton.edu
 
 module purge
 module load cudatoolkit/12.8

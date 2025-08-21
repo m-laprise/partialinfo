@@ -39,8 +39,8 @@ class DotGATHead(nn.Module):
         nn.init.kaiming_uniform_(self.W_fwd, a=0.5)
         nn.init.kaiming_uniform_(self.b_fwd, a=0.5)
 
-        self.norm1   = nn.LayerNorm(out_features)
-        self.norm2   = nn.LayerNorm(out_features)
+        self.norm1   = nn.RMSNorm(out_features)
+        self.norm2   = nn.RMSNorm(out_features)
         self.dropout = dropout
         self.act     = nn.SiLU()
     
@@ -86,7 +86,7 @@ class DotGATHead(nn.Module):
                 )                            # [B, H, A, Dh]
         else:
             out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_bias, dropout_p=dropout_p
+                q, k, v, attn_mask=attn_bias, dropout_p=dropout_p, is_causal=False
             )                                # [B, H, A, Dh]
             
         out = out.transpose(1, 2).reshape(x.size(0), -1, self.heads * self.head_dim)
@@ -167,8 +167,8 @@ class DistributedDotGAT(nn.Module):
         adjacency_mode: str,
         message_steps: int,
         sensing_masks: Union[None, SensingMasks] = None,
-        k: int = 10, p: float = 0.3, 
-        freeze_zero_frac: float = 0.5
+        k: int = 4, p: float = 0.0, 
+        freeze_zero_frac: float = 1.0
     ):
         super().__init__()
         self.output_dim = n * m
@@ -181,8 +181,8 @@ class DistributedDotGAT(nn.Module):
         self.sensing_masks = sensing_masks
         self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
         nn.init.kaiming_uniform_(self.W_embed, a=0.5)
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.norm1 = nn.RMSNorm(hidden_dim)
+        self.norm2 = nn.RMSNorm(hidden_dim)
         self.act    = nn.SiLU()            # fused Swish
         if self.message_steps > 0:
             self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
@@ -201,8 +201,8 @@ class DistributedDotGAT(nn.Module):
         #    attn_bias = attn_bias > 0.0
         for _ in range(self.message_steps):
             h = h + self.gat_head(h, attn_bias)
-            h = self.act(self.norm2(h))
-        return h
+            h = self.norm2(h)
+        return self.act(h)
     
     def forward(self, x):
         # x: [batch, num_agents, input_dim]
@@ -287,7 +287,7 @@ class CollectiveClassifier(nn.Module):
         self.W_decode = nn.Parameter(torch.empty(size=(num_agents, agent_outputs_dim, m)))
         nn.init.kaiming_uniform_(self.W_decode, a=0.5)
         self.activation = nn.SiLU()
-        self.norm_in = nn.LayerNorm(agent_outputs_dim)
+        self.norm_in = nn.RMSNorm(agent_outputs_dim)
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """

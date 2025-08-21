@@ -51,7 +51,7 @@ if __name__ == '__main__':
     parser.add_argument('--steps', type=int, default=5, 
                         help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     # Training hyperparameters
-    parser.add_argument('--dropout', type=float, default=0.0, help='Dropout probability during training')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout probability during training')
     parser.add_argument('--lr', type=float, default=0.001, help='Initial learning rate')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')

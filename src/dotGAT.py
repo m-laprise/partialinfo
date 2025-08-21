@@ -136,7 +136,7 @@ class TrainableSmallWorld(nn.Module):
         self.register_buffer("learn_col",  learnable_idx[:, 1])
         # single 1-D parameter for the trainable biases
         init = torch.zeros(len(learnable_idx), device=device)
-        init[adj[self.learn_row, self.learn_col]] = 3.0        # type: ignore
+        init[adj[self.learn_row, self.learn_col]] = 0.0        # type: ignore
         self.bias_param = nn.Parameter(init)
         # keep the mask for inspection
         self.register_buffer("learn_mask", learn_mask)
@@ -150,6 +150,7 @@ class TrainableSmallWorld(nn.Module):
                           float('-inf'),
                           device=self.bias_param.device)
         bias[self.learn_row, self.learn_col] = self.bias_param       # type: ignore
+        bias.fill_diagonal_(1.0)
         if self.symmetric:                                           # keep symmetry
             bias = torch.maximum(bias, bias.T)
         return bias.unsqueeze(0)
@@ -195,7 +196,10 @@ class DistributedDotGAT(nn.Module):
         return x if self.sensing_masks is None else self.sensing_masks(x)
         
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
-        attn_bias = self.connect() if self.adjacency_mode == 'learned' else None
+        if self.adjacency_mode == 'learned':
+            attn_bias = self.connect()
+        else:
+            attn_bias = None
         # convert to bool
         #if attn_bias is not None:
         #    attn_bias = attn_bias > 0.0

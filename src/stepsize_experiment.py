@@ -121,8 +121,8 @@ if __name__ == '__main__':
         
         if torch.cuda.is_available():
             print("Compiling model and aggregator with torch.compile...")  
-            model = torch.compile(model, mode='reduce-overhead', fullgraph=True) # also should try: "max-autotune"
-            aggregator = torch.compile(aggregator, mode='reduce-overhead', fullgraph=True)
+            model = torch.compile(model, mode='reduce-overhead') 
+            aggregator = torch.compile(aggregator, mode='reduce-overhead')
             print("torch.compile done.")
         
         optimizer = torch.optim.Adam(

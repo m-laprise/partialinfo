@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=stepsize1e5   # create a short name for your job
+#SBATCH --job-name=stepsize1e4   # create a short name for your job
 #SBATCH --nodes=1                # node count
 #SBATCH --ntasks=1               # total number of tasks across all nodes
 #SBATCH --cpus-per-task=4        # cpu-cores per task (>1 if multi-threaded tasks)
@@ -15,4 +15,4 @@ module purge
 module load cudatoolkit/12.8
 nvidia-smi > "./results/nvidia-smi-${SLURM_JOB_ID}.txt"
 
-uv run ./src/stepsize_experiment.py --t 50 --m 25 --r 25 --density 0.5 --num_agents 128 --hidden_dim 384  --lr 1e-5 --epochs 150 --batch_size 200 --train_n 4000 --val_n 300 --test_n 300 --nres 10
+uv run ./src/stepsize_experiment.py --t 50 --m 25 --r 25 --density 0.5 --num_agents 128 --hidden_dim 384  --lr 1e-4 --epochs 150 --batch_size 200 --train_n 4000 --val_n 300 --test_n 300 --nres 10

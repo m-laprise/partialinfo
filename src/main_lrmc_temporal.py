@@ -117,7 +117,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
     scaler = GradScaler(device=device.type) if torch.cuda.is_available() else None
     criterion = stacked_cross_entropy_loss
     

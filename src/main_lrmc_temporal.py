@@ -59,6 +59,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_n', type=int, default=800, help='Number of training matrices')
     parser.add_argument('--val_n', type=int, default=200, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=200, help='Number of test matrices')
+    parser.add_argument('--nres', type=int, default=10, help='Number of realizations per DGP')
     
     args = parser.parse_args()
 
@@ -71,9 +72,9 @@ if __name__ == '__main__':
         torch.backends.cudnn.benchmark = True
     
     with torch.no_grad():  
-        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r)
-        val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r)
-        test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r)
+        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
+        val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
+        test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
         
         train_data = TemporalData(train_GT)
         val_data = TemporalData(val_GT, verbose=False)

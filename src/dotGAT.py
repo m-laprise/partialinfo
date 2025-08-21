@@ -196,8 +196,8 @@ class DistributedDotGAT(nn.Module):
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
         attn_bias = self.connect() if self.adjacency_mode == 'learned' else None
         # convert to bool
-        if attn_bias is not None:
-            attn_bias = attn_bias > 0.0
+        #if attn_bias is not None:
+        #    attn_bias = attn_bias > 0.0
         for _ in range(self.message_steps):
             h = h + self.gat_head(h, attn_bias)
             h = self.act(self.norm2(h))

@@ -42,6 +42,7 @@ class DotGATHead(nn.Module):
         self.norm1   = nn.LayerNorm(out_features)
         self.norm2   = nn.LayerNorm(out_features)
         self.dropout = dropout
+        self.act     = nn.SiLU()
     
     def _project_qkv(self, x: torch.Tensor):
         # x: [B, A, Din]
@@ -92,7 +93,7 @@ class DotGATHead(nn.Module):
         out = self.norm2(out)                                    # post-norm
         # fused forward projection (one GEMM via einsum); broadcast the bias
         out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.b_fwd.unsqueeze(0)
-        return out
+        return self.act(out)
 
 
 class TrainableSmallWorld(nn.Module):

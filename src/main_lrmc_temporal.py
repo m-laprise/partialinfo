@@ -59,7 +59,11 @@ if __name__ == '__main__':
     parser.add_argument('--val_n', type=int, default=400, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=400, help='Number of test matrices')
     parser.add_argument('--nres', type=int, default=10, help='Number of realizations per DGP')
-    parser.add_argument('--sharedV', type=bool, default=True, help='Whether agents share a V embedding matrix')
+    parser.add_argument("--sharedv", dest="sharedv", action="store_true", 
+                        help="Agents share a V embedding matrix")
+    parser.add_argument("--no-sharedv", dest="sharedv", action="store_false", 
+                        help="Agents have their own V embedding matrices")
+    parser.set_defaults(flag=True)
     
     args = parser.parse_args()
 
@@ -95,7 +99,7 @@ if __name__ == '__main__':
 
     model = DistributedDotGAT(
         device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
-        num_agents=args.num_agents, num_heads=args.att_heads, sharedV = args.sharedV, dropout=args.dropout, 
+        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=bool(args.sharedv), dropout=args.dropout, 
         message_steps=args.steps, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
     ).to(device)
     count_parameters(model)

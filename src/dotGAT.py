@@ -58,16 +58,16 @@ class DotGATHead(nn.Module):
         with torch.no_grad():
             # Note: gain decreases as the a value increases, which narrows the init bounds (smaller weight magnitude)
             # gain = √2 / √(1 + a²); bound = gain * (√3 / √fan_mode)
-            a_val = 2
+            a_val = 1.5
             nn.init.zeros_(self.b_fwd)
             nonlin = 'leaky_relu'
             # per-slice, to ignore agent dim
             for i in range(self.W_q.size(0)):
-                nn.init.kaiming_uniform_(self.W_fwd[i], a=a_val, nonlinearity=nonlin)
-                nn.init.kaiming_uniform_(self.W_q[i], a=a_val, nonlinearity=nonlin)
-                nn.init.kaiming_uniform_(self.W_k[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_normal_(self.W_fwd[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_normal_(self.W_q[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_normal_(self.W_k[i], a=a_val, nonlinearity=nonlin)
                 if not self.sharedV:
-                    nn.init.kaiming_uniform_(self.W_v[i], a=a_val, nonlinearity=nonlin)
+                    nn.init.kaiming_normal_(self.W_v[i], a=a_val, nonlinearity=nonlin)
                     
             if self.sharedV:
                 self.W_v_shared.reset_parameters()
@@ -225,10 +225,10 @@ class DistributedDotGAT(nn.Module):
         normal 2D linear weight
         """
         with torch.no_grad():
-            a_val = 2
+            a_val = 1.5
             for i in range(self.W_embed.size(0)):
                 # dims are reversed so this is actually fan_in
-                nn.init.kaiming_uniform_(self.W_embed[i], a=a_val, 
+                nn.init.kaiming_normal_(self.W_embed[i], a=a_val, 
                                          mode='fan_out', nonlinearity='leaky_relu')
 
     def sense(self, x):
@@ -336,10 +336,10 @@ class CollectiveClassifier(nn.Module):
     
     def reset_parameters(self):
         with torch.no_grad():
-            a_val = 2
+            a_val = 1.5
             for i in range(self.W_decode.size(0)):
                 # Note: dims are reversed so this is actually fan_in (stabilizes forward pass)
-                nn.init.kaiming_uniform_(self.W_decode[i], a=a_val, 
+                nn.init.kaiming_normal_(self.W_decode[i], a=a_val, 
                                          mode='fan_out', nonlinearity='leaky_relu')
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
@@ -351,8 +351,8 @@ class CollectiveClassifier(nn.Module):
         assert A == self.n_agents and H == self.agent_d_out
 
         agent_outputs = self.prenorm(agent_outputs)
-        agent_decoded = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
-        agent_preds = self.act(agent_decoded)
+        agent_preds = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
+        agent_preds = self.act(agent_preds)
         
         if self.n_agents == 1:
             return agent_preds.squeeze(1)

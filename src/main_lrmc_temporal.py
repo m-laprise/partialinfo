@@ -56,8 +56,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--patience', type=int, default=0, help='Early stopping patience')
     parser.add_argument('--train_n', type=int, default=800, help='Number of training matrices')
-    parser.add_argument('--val_n', type=int, default=200, help='Number of validation matrices')
-    parser.add_argument('--test_n', type=int, default=200, help='Number of test matrices')
+    parser.add_argument('--val_n', type=int, default=400, help='Number of validation matrices')
+    parser.add_argument('--test_n', type=int, default=400, help='Number of test matrices')
     parser.add_argument('--nres', type=int, default=10, help='Number of realizations per DGP')
     parser.add_argument('--sharedV', type=bool, default=True, help='Whether agents share a V embedding matrix')
     

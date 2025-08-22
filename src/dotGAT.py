@@ -23,25 +23,30 @@ class DotGATHead(nn.Module):
                  sharedV: bool, dropout: float = 0, heads: int = 4):
         super().__init__()
         assert out_features % heads == 0
+        if in_features != out_features:
+            raise NotImplementedError("Mismatched message-passing input and output dimensions.")
+        self.n_agents = num_agents
+        self.d_hidden = in_features
         self.heads = heads
-        self.head_dim = out_features // heads
+        self.head_dim = self.d_hidden // self.heads
         self.sharedV = sharedV
+        self.dropout = dropout
         
         # batched weights: one slice per agent
-        self.W_q = nn.Parameter(torch.empty(num_agents, in_features, self.heads * self.head_dim))
+        self.W_q = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
         self.W_k = nn.Parameter(torch.empty_like(self.W_q))
         if self.sharedV:
-            self.W_v_shared = nn.Linear(in_features, self.heads * self.head_dim, bias=True)
+            self.W_v_shared = nn.Linear(self.d_hidden, self.d_hidden, bias=True)
         else:
             self.W_v = nn.Parameter(torch.empty_like(self.W_q))
 
-        self.W_fwd  = nn.Parameter(torch.empty(num_agents, out_features, out_features))
-        self.b_fwd  = nn.Parameter(torch.empty(num_agents, out_features))
+        self.W_fwd = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        self.b_fwd = nn.Parameter(torch.empty(self.n_agents, self.d_hidden))
 
-        self.norm1   = nn.RMSNorm(out_features)
-        self.norm2   = nn.RMSNorm(out_features)
-        self.dropout = dropout
-        self.act     = nn.SiLU()
+        self.prenorm = nn.RMSNorm(self.d_hidden)
+        self.postnorm = nn.RMSNorm(self.d_hidden)
+        
+        self.act = nn.SiLU()
         
         self.reset_parameters()  # initialize weights
     
@@ -50,25 +55,25 @@ class DotGATHead(nn.Module):
         Custom initialization to make sure each agent's slice [Din, Dout] is initialized like a 
         normal 2D linear weight
         """
-        nonlin = 'leaky_relu'
         with torch.no_grad():
-            a_val = 0.75
-            nn.init.kaiming_uniform_(self.W_fwd, a=a_val, mode='fan_in', nonlinearity=nonlin)
+            # Note: gain decreases as the a value increases, which narrows the init bounds (smaller weight magnitude)
+            # gain = √2 / √(1 + a²); bound = gain * (√3 / √fan_mode)
+            a_val = 2
             nn.init.zeros_(self.b_fwd)
-            
+            nonlin = 'leaky_relu'
             # per-slice, to ignore agent dim
             for i in range(self.W_q.size(0)):
-                nn.init.kaiming_uniform_(self.W_q[i], a=a_val, mode='fan_in', nonlinearity=nonlin)
-                nn.init.kaiming_uniform_(self.W_k[i], a=a_val, mode='fan_in', nonlinearity=nonlin)
+                nn.init.kaiming_uniform_(self.W_fwd[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_uniform_(self.W_q[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_uniform_(self.W_k[i], a=a_val, nonlinearity=nonlin)
                 if not self.sharedV:
-                    nn.init.kaiming_uniform_(self.W_v[i], a=a_val, mode='fan_in', nonlinearity=nonlin)
+                    nn.init.kaiming_uniform_(self.W_v[i], a=a_val, nonlinearity=nonlin)
                     
             if self.sharedV:
                 self.W_v_shared.reset_parameters()
     
     def _project_qkv(self, x: torch.Tensor):
         # x: [B, A, Din]
-        # einsum → single GEMM for all agents
         # result: [B, A, H*Dh]
         q = torch.einsum('bad,adh->bah', x, self.W_q)
         k = torch.einsum('bad,adh->bah', x, self.W_k)
@@ -84,8 +89,8 @@ class DotGATHead(nn.Module):
         return q, k, v   
     
     def forward(self, x: torch.Tensor, attn_bias: torch.Tensor | None = None):
-        # x: [B, A, Din];   connect: [A, A] or [1, A, A]
-        x = self.norm1(x)                                        # pre-norm
+        # x: [B, A, Din];   attn_bias: [A, A] or [1, A, A]
+        x = self.prenorm(x)
         q, k, v = self._project_qkv(x)
         dropout_p = self.dropout if self.training else 0.0
         if attn_bias is not None:
@@ -95,11 +100,9 @@ class DotGATHead(nn.Module):
             attn_bias = attn_bias.to(device=q.device, dtype=q.dtype)
             
         if torch.cuda.is_available():
-            # Call SDPA in a context that forbids the slow math kernel
             # Enable Flash first, fall back to Mem-Efficient if Flash is unsupported
-            backends_ok = [SDPBackend.FLASH_ATTENTION,
-                           SDPBackend.EFFICIENT_ATTENTION]
-            # (set_priority=True → Flash tried first, Efficient second)
+            # Error rather than fall back on slow math kernel
+            backends_ok = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
             with sdpa_kernel(backends_ok, set_priority=True):
                 out = F.scaled_dot_product_attention(
                     q, k, v, attn_mask=attn_bias, dropout_p=dropout_p, is_causal=False
@@ -110,7 +113,7 @@ class DotGATHead(nn.Module):
             )                                # [B, H, A, Dh]
             
         out = out.transpose(1, 2).reshape(x.size(0), -1, self.heads * self.head_dim)
-        out = self.norm2(out)                                    # post-norm
+        out = self.postnorm(out)                                    # post-norm
         # fused forward projection (one GEMM via einsum); broadcast the bias
         out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.b_fwd.unsqueeze(0)
         return self.act(out)
@@ -193,25 +196,25 @@ class DistributedDotGAT(nn.Module):
         freeze_zero_frac: float = 1.0
     ):
         super().__init__()
-        self.output_dim = n * m
         self.n, self.m = n, m
-        self.num_agents = num_agents
-        self.hidden_dim = hidden_dim
+        self.d_in = input_dim   # = n * m
+        self.n_agents = num_agents
+        self.d_out = hidden_dim # size of the internal state of each agent
         self.message_steps = message_steps
-        self.sharedV = sharedV
         self.dropout = dropout
         self.adjacency_mode = adjacency_mode        
         self.sensing_masks = sensing_masks
         
-        self.W_embed = nn.Parameter(torch.empty(size=(num_agents, input_dim, hidden_dim)))
+        self.W_embed = nn.Parameter(torch.empty(size=(self.n_agents, self.d_in, self.d_out)))
+        
         if self.message_steps > 0:
-            self.gat_head = DotGATHead(num_agents, hidden_dim, hidden_dim, 
-                                       dropout=dropout, heads=num_heads, sharedV = self.sharedV)
+            self.gat_head = DotGATHead(self.n_agents, self.d_out, self.d_out, 
+                                       dropout=dropout, heads=num_heads, sharedV=sharedV)
             if adjacency_mode == 'learned':
-                self.connect = TrainableSmallWorld(num_agents, device, 
+                self.connect = TrainableSmallWorld(self.n_agents, device, 
                                                    k=k, p=p, freeze_frac=freeze_zero_frac)
-        self.norm1 = nn.RMSNorm(hidden_dim)
-        self.norm2 = nn.RMSNorm(hidden_dim)
+        self.outernorm = nn.RMSNorm(self.d_out)
+        self.innernorm = nn.RMSNorm(self.d_out)
         self.act    = nn.SiLU()            # fused Swish
         
         self.reset_parameters()  # initialize weights
@@ -222,10 +225,11 @@ class DistributedDotGAT(nn.Module):
         normal 2D linear weight
         """
         with torch.no_grad():
-            a_val = 0.75
+            a_val = 2
             for i in range(self.W_embed.size(0)):
+                # dims are reversed so this is actually fan_in
                 nn.init.kaiming_uniform_(self.W_embed[i], a=a_val, 
-                                         mode='fan_in', nonlinearity='leaky_relu')
+                                         mode='fan_out', nonlinearity='leaky_relu')
 
     def sense(self, x):
         return x if self.sensing_masks is None else self.sensing_masks(x)
@@ -235,19 +239,18 @@ class DistributedDotGAT(nn.Module):
             attn_bias = self.connect()
         else:
             attn_bias = None
-        # convert to bool
-        #if attn_bias is not None:
-        #    attn_bias = attn_bias > 0.0
         for _ in range(self.message_steps):
             h = h + self.gat_head(h, attn_bias)
-            h = self.norm2(h)
+            h = self.innernorm(h)
         return self.act(h)
     
     def forward(self, x):
-        # x: [batch, num_agents, input_dim]
+        # x: [batch, num_agents, d_in]
+        # Apply sparse mask to convey partial information to agents
         x = self.sense(x)
-        agents_embeddings = torch.einsum('bij,ijk->bik', x, self.W_embed)
-        h = self.norm1(agents_embeddings)
+        # Agent embeddings to internal state
+        h = torch.einsum('bij,ijk->bik', x, self.W_embed)
+        h = self.outernorm(h)
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
         if self.message_steps > 0:
@@ -320,21 +323,24 @@ class CollectiveClassifier(nn.Module):
     """
     def __init__(self, num_agents: int, agent_outputs_dim: int, m: int):
         super().__init__()
-        self.num_agents = num_agents
-        self.agent_outputs_dim = agent_outputs_dim
-        self.output_dim = m
-        self.W_decode = nn.Parameter(torch.empty(size=(num_agents, agent_outputs_dim, m)))
-        self.norm_in = nn.RMSNorm(agent_outputs_dim)
+        self.n_agents = num_agents
+        self.agent_d_out = agent_outputs_dim
+        self.n_classes = m
+        self.W_decode = nn.Parameter(
+            torch.empty(size=(self.n_agents, self.agent_d_out, self.n_classes))
+        )
+        self.prenorm = nn.RMSNorm(self.agent_d_out)
         self.act = nn.SiLU()
         
         self.reset_parameters()  # initialize weights
     
     def reset_parameters(self):
         with torch.no_grad():
-            a_val = 0.75
+            a_val = 2
             for i in range(self.W_decode.size(0)):
+                # Note: dims are reversed so this is actually fan_in (stabilizes forward pass)
                 nn.init.kaiming_uniform_(self.W_decode[i], a=a_val, 
-                                         mode='fan_in', nonlinearity='leaky_relu')
+                                         mode='fan_out', nonlinearity='leaky_relu')
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
@@ -342,13 +348,13 @@ class CollectiveClassifier(nn.Module):
         returns intermediate logits: [B, A, m]
         """
         _, A, H = agent_outputs.shape
-        assert A == self.num_agents and H == self.agent_outputs_dim
+        assert A == self.n_agents and H == self.agent_d_out
 
-        agent_outputs = self.norm_in(agent_outputs)
+        agent_outputs = self.prenorm(agent_outputs)
         agent_decoded = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
         agent_preds = self.act(agent_decoded)
         
-        if self.num_agents == 1:
+        if self.n_agents == 1:
             return agent_preds.squeeze(1)
         else:
             return agent_preds

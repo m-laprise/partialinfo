@@ -2,14 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp.autocast_mode import autocast
-
-
-def init_weights(m):
-    if isinstance(m, nn.Linear):
-        #nn.init.xavier_uniform_(m.weight, gain=1.0)
-        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
             
 
 def init_stats():

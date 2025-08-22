@@ -22,7 +22,6 @@ from utils.plotting import plot_classif
 from utils.training_temporal import (
     evaluate,
     init_stats,
-    init_weights,
     stacked_cross_entropy_loss,
     train,
 )
@@ -60,6 +59,7 @@ if __name__ == '__main__':
     parser.add_argument('--val_n', type=int, default=200, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=200, help='Number of test matrices')
     parser.add_argument('--nres', type=int, default=10, help='Number of realizations per DGP')
+    parser.add_argument('--sharedV', type=bool, default=True, help='Whether agents share a V embedding matrix')
     
     args = parser.parse_args()
 
@@ -94,17 +94,15 @@ if __name__ == '__main__':
     )
 
     model = DistributedDotGAT(
-        device=device, input_dim=args.t * args.m,  hidden_dim=args.hidden_dim, n=args.t, m=args.m,
-        num_agents=args.num_agents, num_heads=args.att_heads, dropout=args.dropout, 
+        device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
+        num_agents=args.num_agents, num_heads=args.att_heads, sharedV = args.sharedV, dropout=args.dropout, 
         message_steps=args.steps, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
     ).to(device)
-    model.apply(init_weights)
     count_parameters(model)
     
     aggregator = CollectiveClassifier(
         num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
     ).to(device)
-    aggregator.apply(init_weights)
     count_parameters(aggregator)
     print("--------------------------")
     

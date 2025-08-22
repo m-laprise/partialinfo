@@ -17,12 +17,11 @@ from torch.utils.data import DataLoader
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
 from dotGAT import CollectiveClassifier, DistributedDotGAT
 from utils.logging import log_training_run
-from utils.misc import count_parameters, unique_filename
+from utils.misc import unique_filename
 from utils.plotting import plot_classif
 from utils.training_temporal import (
     evaluate,
     init_stats,
-    init_weights,
     stacked_cross_entropy_loss,
     train,
 )
@@ -58,6 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--val_n', type=int, default=200, help='Number of validation matrices')
     parser.add_argument('--test_n', type=int, default=200, help='Number of test matrices')
     parser.add_argument('--nres', type=int, default=100, help='Number of realizations per DGP')
+    parser.add_argument('--sharedV', type=bool, default=True, help='Whether agents share a V embedding matrix')
     
     args = parser.parse_args()
 
@@ -110,13 +110,12 @@ if __name__ == '__main__':
         model = DistributedDotGAT(
             device=device, input_dim=args.t * args.m,  hidden_dim=args.hidden_dim, n=args.t, m=args.m,
             num_agents=args.num_agents, num_heads=args.att_heads, dropout=args.dropout, 
+            sharedV=args.sharedV,
             message_steps=args.steps, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
         ).to(device)
-        model.apply(init_weights)
         aggregator = CollectiveClassifier(
             num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
         ).to(device)
-        aggregator.apply(init_weights)
         print("--------------------------")
         
         if torch.cuda.is_available():

@@ -60,8 +60,8 @@ class DotGATHead(nn.Module):
             nonlin = 'leaky_relu'
             # per-slice, to ignore agent dim
             for i in range(self.W_q.size(0)):
-                nn.init.xavier_normal_(self.W_q[i])
-                nn.init.xavier_normal_(self.W_k[i])
+                nn.init.xavier_uniform_(self.W_q[i])
+                nn.init.xavier_uniform_(self.W_k[i])
                 if not self.sharedV:
                     nn.init.kaiming_normal_(self.W_v[i], a=a_val, nonlinearity=nonlin)
             if self.sharedV:
@@ -349,7 +349,7 @@ class CollectiveClassifier(nn.Module):
     def reset_parameters(self):
         with torch.no_grad():
             for i in range(self.W_decode.size(0)):
-                nn.init.xavier_normal_(self.W_decode[i])
+                nn.init.xavier_uniform_(self.W_decode[i])
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
@@ -357,7 +357,8 @@ class CollectiveClassifier(nn.Module):
         returns intermediate logits: [B, A, m]
         """
         _, A, H = agent_outputs.shape
-        assert A == self.n_agents and H == self.agent_d_out
+        if A != self.n_agents or H != self.agent_d_out:
+            raise ValueError(f"Expected a_outputs shape [B,{self.n_agents},{self.agent_d_out}], got {agent_outputs.shape}")
 
         agent_outputs = self.prenorm(agent_outputs)
         agent_logits = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)

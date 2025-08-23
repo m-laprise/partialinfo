@@ -17,31 +17,38 @@ def init_stats():
 
 def stacked_cross_entropy_loss(logits: torch.Tensor,
                                targets: torch.Tensor,
-                               reduction: str = 'mean') -> torch.Tensor:
+                               reduction: str = 'mean',
+                               label_smoothing: float = 0.0,
+                               ignore_index: int = -100) -> torch.Tensor:
     """
-    Computes cross-entropy loss for stacked logits.
+    Computes cross-entropy loss over stacked agent logits.
+    logits:  [B, A, m] or [B, m] (A defaults to 1 if omitted)
+    targets: [B] (class indices)
 
-    Args:
-        logits (torch.Tensor): Tensor of shape [batch_size, num_agents, m], where num_agents is the 
-            number of stacked predictions, and m is the number of classes.
-        targets (torch.Tensor): Tensor of shape [batch_size], containing class indices.
-        reduction (str): Specifies the reduction to apply to the output. Default: 'mean'.
-
-    Returns:
-        torch.Tensor: Scalar loss (if reduced) or tensor of shape [batch_size, k] (if 'none').
+    Returns torch.Tensor: Scalar loss (if reduced) or tensor of shape [batch_size, k] (if 'none').
     """
     if logits.dim() != 3:
         raise ValueError(f"Expected logits with 3 dimensions [batch_size, k, m], got {logits.shape}")
     if targets.dim() != 1:
         raise ValueError(f"Expected targets with 1 dimension [batch_size], got {targets.shape}")
-    batch_size, k, n_classes = logits.shape
+    
+    batch_size, n_agents, n_classes = logits.shape
+    
+    if targets.dtype != torch.long:
+        targets = targets.long()
+    if torch.any((targets < 0) | (targets >= n_classes)):
+        raise ValueError("targets contain indices outside [0, n_classes-1].")
+    
     # Expand and reshape targets
-    expanded_targets = targets.unsqueeze(1).expand(-1, k).reshape(-1)  # [batch_size * k]
-    logits_flat = logits.reshape(-1, n_classes)                        # [batch_size * k, m]
+    expanded_targets = targets.unsqueeze(1).expand(-1, n_agents).reshape(-1)  # [batch_size * A]
+    logits_flat = logits.reshape(-1, n_classes)                        # [batch_size * A, m]
     # Compute per-prediction cross-entropy loss
-    loss_fn = nn.CrossEntropyLoss(reduction='none')
-    losses = loss_fn(logits_flat, expanded_targets)                    # [batch_size * k]
-    losses = losses.view(batch_size, k)                                # [batch_size, k]
+    losses = nn.CrossEntropyLoss(
+        reduction='none',
+        label_smoothing=label_smoothing,
+        ignore_index=ignore_index
+    )(logits_flat, expanded_targets)                                   # [batch_size * A]
+    losses = losses.view(batch_size, n_agents)                         # [batch_size, A]
     # Apply reduction
     if reduction == 'mean':
         return losses.mean()

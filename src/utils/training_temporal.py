@@ -1,9 +1,10 @@
 from contextlib import nullcontext
+from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 
 
 def stacked_cross_entropy_loss(logits: torch.Tensor,
@@ -49,43 +50,53 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
         raise ValueError(f"Invalid reduction type: {reduction}")
 
 
-def train(model, aggregator, loader, optimizer, criterion, 
-          t, m, rank, 
-          device, scaler):
+def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optional[GradScaler]):
     model.train()
-    total_loss = 0
+    use_amp = (device.type == 'cuda') and (scaler is not None)
+    autocast_ctx = autocast(device_type='cuda') if use_amp else nullcontext()
+    
+    total_loss = 0.0
+    total_examples = 0
+    
     for batch in loader:
-        torch.compiler.cudagraph_mark_step_begin()
+        if device.type == 'cuda':
+            try:
+                torch.compiler.cudagraph_mark_step_begin()
+            except Exception:
+                pass
+
         optimizer.zero_grad(set_to_none=True)
 
-        x = batch['matrix'].to(device, 
-                               non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]
-        target = batch['label'].to(device, 
-                                   non_blocking=torch.cuda.is_available())  # shape: [batch_size]
+        x = batch['matrix'].to(device, non_blocking=True)       # [batch_size, t * m]
+        target = batch['label'].to(device, non_blocking=True)   # [batch_size]
+        B = target.size(0)
         
-        # Conditionally autocast if on GPU
-        if torch.cuda.is_available() and scaler is not None:
-            with autocast(device_type="cuda"):
-                out = model(x)
-                logits = aggregator(out) 
-                loss = criterion(logits, target)
-
+        with autocast_ctx:
+            logits = aggregator(model(x))
+            loss = criterion(logits, target, reduction='mean')
+            
+        if use_amp:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # clip both model + aggregator
+            torch.nn.utils.clip_grad_norm_(
+                list(model.parameters()) + list(aggregator.parameters()),
+                max_norm=1.0
+            )
             scaler.step(optimizer)
             scaler.update()
         else:
-            out = model(x)
-            logits = aggregator(out) 
-            loss = criterion(logits, target)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(
+                list(model.parameters()) + list(aggregator.parameters()),
+                max_norm=1.0
+            )
             optimizer.step()
 
         total_loss += loss.item()
+        total_examples += B
         
-    return total_loss / len(loader)
+    return total_loss / max(total_examples, 1)
     
 
 @torch.inference_mode()

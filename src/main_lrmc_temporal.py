@@ -135,8 +135,7 @@ if __name__ == '__main__':
     print(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
     for epoch in range(1, args.epochs + 1):
         train_loss = train(
-            model, aggregator, train_loader, optimizer, criterion, 
-            args.t, args.m, args.r, device, scaler
+            model, aggregator, train_loader, optimizer, criterion, device, scaler
         )
         scheduler.step()
         _, t_accuracy, t_agreement = evaluate(

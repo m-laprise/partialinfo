@@ -180,7 +180,7 @@ class DistributedDotGAT(nn.Module):
         dropout: float,
         adjacency_mode: str,
         message_steps: int,
-        sensing_masks: Optional[SensingMasks] = None,
+        sensing_masks: Optional[SensingMasks],
         k: int = 4, p: float = 0.0, 
         freeze_zero_frac: float = 1.0
     ):

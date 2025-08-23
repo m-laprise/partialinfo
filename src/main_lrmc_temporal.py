@@ -81,12 +81,10 @@ if __name__ == '__main__':
         train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
         val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
         test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
-        
         train_data = TemporalData(train_GT)
         val_data = TemporalData(val_GT, verbose=False)
         test_data = TemporalData(test_GT, verbose=False)
-    
-        sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density).to(device)
+        sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
     
     num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
     print(f"Number of workers: {num_workers}")
@@ -169,7 +167,7 @@ if __name__ == '__main__':
             if device.type == 'cuda':
                 torch.cuda.synchronize()
             t1 = datetime.now()
-            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
+            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds():.4f} seconds.")
             
         if epoch % 10 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. ",

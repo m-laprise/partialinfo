@@ -116,7 +116,7 @@ if __name__ == '__main__':
         aggregator = torch.compile(aggregator, mode='reduce-overhead', fullgraph=True)
         print("torch.compile done.")
     
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
@@ -140,10 +140,10 @@ if __name__ == '__main__':
         )
         scheduler.step()
         _, t_accuracy, t_agreement = evaluate(
-            model, aggregator, train_loader, criterion, args.t, args.m, args.r, device, tag="train", 
+            model, aggregator, train_loader, criterion, device,
         )
         val_loss, val_accuracy, val_agreement = evaluate(
-            model, aggregator, val_loader, criterion, args.t, args.m, args.r, device, tag="val"
+            model, aggregator, val_loader, criterion, device,
         )
         
         stats["train_loss"].append(train_loss)
@@ -209,7 +209,7 @@ if __name__ == '__main__':
         pin_memory=torch.cuda.is_available(), num_workers=num_workers, 
     )
     test_loss, test_accuracy, test_agreement = evaluate(
-        model, aggregator, test_loader, criterion, args.t, args.m, args.r, device, tag="test"
+        model, aggregator, test_loader, criterion, device,
     )
     print("Test Set Performance | ",
           f"Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}, % maj: {test_agreement:.2f}")

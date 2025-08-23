@@ -1,36 +1,26 @@
+from contextlib import nullcontext
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp.autocast_mode import autocast
-            
-
-def init_stats():
-    return {
-        "train_loss": [],
-        "t_accuracy": [],
-        "t_agreement": [],
-        "val_loss": [],
-        "val_accuracy": [],
-        "val_agreement": []
-    }
 
 
 def stacked_cross_entropy_loss(logits: torch.Tensor,
                                targets: torch.Tensor,
                                reduction: str = 'mean',
-                               label_smoothing: float = 0.0,
-                               ignore_index: int = -100) -> torch.Tensor:
+                               label_smoothing: float = 0.0) -> torch.Tensor:
     """
     Computes cross-entropy loss over stacked agent logits.
-    logits:  [B, A, m] or [B, m] (A defaults to 1 if omitted)
+    logits:  [B, A, m]
     targets: [B] (class indices)
 
     Returns torch.Tensor: Scalar loss (if reduced) or tensor of shape [batch_size, k] (if 'none').
     """
     if logits.dim() != 3:
-        raise ValueError(f"Expected logits with 3 dimensions [batch_size, k, m], got {logits.shape}")
+        raise ValueError(f"Expected logits with 3 dims [batch_size, n_agents, m], got {logits.shape}")
     if targets.dim() != 1:
-        raise ValueError(f"Expected targets with 1 dimension [batch_size], got {targets.shape}")
+        raise ValueError(f"Expected targets with 1 dim [batch_size], got {targets.shape}")
     
     batch_size, n_agents, n_classes = logits.shape
     
@@ -45,8 +35,7 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
     # Compute per-prediction cross-entropy loss
     losses = nn.CrossEntropyLoss(
         reduction='none',
-        label_smoothing=label_smoothing,
-        ignore_index=ignore_index
+        label_smoothing=label_smoothing
     )(logits_flat, expanded_targets)                                   # [batch_size * A]
     losses = losses.view(batch_size, n_agents)                         # [batch_size, A]
     # Apply reduction
@@ -97,46 +86,68 @@ def train(model, aggregator, loader, optimizer, criterion,
         total_loss += loss.item()
         
     return total_loss / len(loader)
+    
 
-
-@torch.no_grad()
-def evaluate(
-    model, aggregator, loader, criterion, n, m, rank, device, 
-    tag: str = "eval", max_batches=None
-):
+@torch.inference_mode()
+def evaluate(model, aggregator, loader, criterion, device, max_batches=None):
     model.eval()
-    loss, accuracy, agreement = [], [], []
+    autocast_ctx = autocast(device_type='cuda') if device.type == 'cuda' else nullcontext()
+    
+    #loss, accuracy, agreement = [], [], []
+    total_loss = 0.0
+    total_acc = 0.0
+    total_agree = 0.0
+    total_examples = 0
 
     for i, batch in enumerate(loader):
         if max_batches is not None and i >= max_batches:
             break
 
-        x = batch['matrix'].to(
-            device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]
-        target = batch['label'].to(
-            device, non_blocking=torch.cuda.is_available())  # shape: [batch_size]
+        x = batch['matrix'].to(device, non_blocking=True)  # shape: [batch_size, t * m]
+        target = batch['label'].to(device, non_blocking=True)  # shape: [batch_size]
 
-        out = model(x)
-        logits = aggregator(out)
-        loss.append(criterion(logits, target).item())
+        with autocast_ctx:
+            logits = aggregator(model(x))          # [B, A, C] or [B, C]
+            loss = criterion(logits, target, reduction='mean')
+            
+        B = target.size(0)
+        total_loss += loss.item() * B
+        total_examples += B
+        _, A, C = logits.shape
 
         # Compute % accuracy
         # Take majority vote
-        agent_preds = torch.argmax(logits, dim=2)
-        B, A = agent_preds.shape
-        # One-hot encode predictions: [batch_size, k, m]
-        one_hot = torch.nn.functional.one_hot(agent_preds, num_classes=m).sum(dim=1)  # [batch_size, m]
-        # Majority vote is class with highest count
-        majority_class = torch.argmax(one_hot, dim=1)  # [batch_size]
-        vote_accuracy = (majority_class == target).float().mean().item()
-        accuracy.append(vote_accuracy)
+        agent_preds = logits.argmax(dim=-1)         # [B, A]
         
-        agent_agreement = (agent_preds == majority_class.unsqueeze(1)).float().sum(dim=1) / A
-        avg_majority_fraction = agent_agreement.mean().item()
-        agreement.append(avg_majority_fraction)
+        counts = torch.zeros(B, C, device=logits.device, dtype=torch.int32)
+        ones = torch.ones_like(agent_preds, dtype=torch.int32)
+        counts.scatter_add_(1, agent_preds, ones)  # [B, C]
 
+        majority_class = counts.argmax(dim=1)      # [B]
+        vote_accuracy = (majority_class == target).float().mean().item()
+        total_acc += vote_accuracy * B
+
+        avg_majority_fraction = (counts.max(dim=1).values.float() / A).mean().item()
+        total_agree += avg_majority_fraction * B
+
+    mean_loss = total_loss / max(total_examples, 1)
+    mean_acc = total_acc / max(total_examples, 1)
+    mean_agree = total_agree / max(total_examples, 1)
+    
     return (
-        float(np.mean(loss)),
-        float(np.mean(accuracy)),
-        float(np.mean(agreement))
+        float(mean_loss), 
+        float(mean_acc), 
+        float(mean_agree)
     )
+
+
+def init_stats():
+    return {
+        "train_loss": [],
+        "t_accuracy": [],
+        "t_agreement": [],
+        "val_loss": [],
+        "val_accuracy": [],
+        "val_agreement": []
+    }
+    

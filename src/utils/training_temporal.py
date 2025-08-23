@@ -76,15 +76,15 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
             loss = criterion(logits, target, reduction='mean')
             
         if use_amp:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            scaler.scale(loss).backward()   # type: ignore
+            scaler.unscale_(optimizer)      # type: ignore
             # clip both model + aggregator
             torch.nn.utils.clip_grad_norm_(
                 list(model.parameters()) + list(aggregator.parameters()),
                 max_norm=1.0
             )
-            scaler.step(optimizer)
-            scaler.update()
+            scaler.step(optimizer)          # type: ignore
+            scaler.update()                 # type: ignore
         else:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(

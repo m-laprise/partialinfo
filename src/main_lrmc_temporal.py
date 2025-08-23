@@ -120,45 +120,42 @@ if __name__ == '__main__':
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
-    scaler = GradScaler(device=device.type) if torch.cuda.is_available() else None
+    scaler = GradScaler(enabled=(device.type == 'cuda'))
     criterion = stacked_cross_entropy_loss
     
     stats = init_stats()
     file_base = unique_filename()
     checkpoint_path = f"{file_base}_checkpoint.pt"
     
-    best_loss = float('inf')
+    #best_loss = float('inf')
+    best = {"loss": float('inf')}
     patience_counter = 0
 
     # print time at beginning of training
     start = datetime.now()
     print(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
+    
     for epoch in range(1, args.epochs + 1):
-        train_loss = train(
-            model, aggregator, train_loader, optimizer, criterion, device, scaler
-        )
+        train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
         scheduler.step()
-        _, t_accuracy, t_agreement = evaluate(
-            model, aggregator, train_loader, criterion, device,
-        )
-        val_loss, val_accuracy, val_agreement = evaluate(
-            model, aggregator, val_loader, criterion, device,
-        )
+        
+        _, t_acc, t_agree = evaluate(model, aggregator, train_loader, criterion, device)
+        val_loss, val_acc, val_agree = evaluate(model, aggregator, val_loader, criterion, device)
         
         stats["train_loss"].append(train_loss)
-        stats["t_accuracy"].append(t_accuracy)
-        stats["t_agreement"].append(t_agreement)
+        stats["t_accuracy"].append(t_acc)
+        stats["t_agreement"].append(t_agree)
         stats["val_loss"].append(val_loss)
-        stats["val_accuracy"].append(val_accuracy)
-        stats["val_agreement"].append(val_agreement)
+        stats["val_accuracy"].append(val_acc)
+        stats["val_agreement"].append(val_agree)
         
         if epoch == 1:
             t1 = datetime.now()
             print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")        
         if epoch % 10 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. ",
-                  f"T loss: {train_loss:.2e} | T acc: {t_accuracy:.2f} | T % maj: {t_agreement:.2f} | ",
-                  f"V loss: {val_loss:.2e} | V acc: {val_accuracy:.2f} | V % maj: {val_agreement:.2f}")
+                  f"T loss: {train_loss:.2e} | T acc: {t_acc:.2f} | T % maj: {t_agree:.2f} | ",
+                  f"V loss: {val_loss:.2e} | V acc: {val_acc:.2f} | V % maj: {val_agree:.2f}")
         
         # Save connectivity matrix for visualization
         """netxmask = model.connect.learn_mask.detach().cpu().numpy().astype(int)
@@ -171,18 +168,27 @@ if __name__ == '__main__':
         fig.show()"""
         #np.save(f"{file_base}_adj_epoch{epoch}.npy", netx)
         
-        if val_loss < best_loss - 1e-5:
-            best_loss = val_loss
+        improved = val_loss < best["loss"] - 1e-5
+        
+        if improved:
+            best.update(loss=val_loss, acc=val_acc, agree=val_agree, epoch=epoch)
             patience_counter = 0
-            torch.save(model.state_dict(), checkpoint_path)
-            if val_accuracy == 1.0:
-                print(f"Early stopping at epoch {epoch}; accuracy on validation set is 100%.")
+            torch.save({
+                "model": model.state_dict(),
+                "aggregator": aggregator.state_dict(),
+                #"optimizer": optimizer.state_dict(),
+                #"scheduler": scheduler.state_dict(),
+                "epoch": epoch,
+                "args": vars(args),
+            }, checkpoint_path)
+            if val_acc == 1.0:
+                print(f"Early stopping at epoch {epoch}; validation accuracy is 100%.")
                 break
         else:
-           patience_counter += 1
-           if val_loss > 10:
-               print(f"Early stopping at epoch {epoch}; loss on validation set is diverging.")
-               break
+            patience_counter += 1
+            if val_loss > 10:
+                print(f"Early stopping at epoch {epoch}; validation loss is diverging.")
+                break
         #    if patience_counter >= args.patience:
         #        print(f"Early stopping at epoch {epoch}; no improvement for {args.patience} epochs.")
         #        break
@@ -194,10 +200,15 @@ if __name__ == '__main__':
     # Clear memory (avoid OOM) and load best model
     optimizer.zero_grad(set_to_none=True)
     gc.collect()
-    torch.cuda.empty_cache()
-    model.load_state_dict(torch.load(checkpoint_path))
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        
+    state = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state["model"])
+    aggregator.load_state_dict(state["aggregator"])
     model.to(device)
-    print("Loaded best model from checkpoint.")
+    aggregator.to(device)
+    print(f"Loaded best model (epoch {state['epoch']}) from checkpoint.")
 
     random_accuracy = 1.0 / args.m
     plot_classif(stats, file_base, random_accuracy)
@@ -207,14 +218,12 @@ if __name__ == '__main__':
         test_data, batch_size=args.batch_size, 
         pin_memory=torch.cuda.is_available(), num_workers=num_workers, 
     )
-    test_loss, test_accuracy, test_agreement = evaluate(
-        model, aggregator, test_loader, criterion, device,
-    )
+    test_loss, test_acc, test_agree = evaluate(model, aggregator, test_loader, criterion, device)
     print("Test Set Performance | ",
-          f"Loss: {test_loss:.2e}, Accuracy: {test_accuracy:.2f}, % maj: {test_agreement:.2f}")
+          f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
 
     log_training_run(
-        file_base, args, stats, test_loss, test_accuracy, test_agreement, 
+        file_base, args, stats, test_loss, test_acc, test_agree, 
         start, end, model, aggregator
     )
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'

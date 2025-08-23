@@ -1,5 +1,5 @@
-import glob
-import os
+#import glob
+#import os
 
 #import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -96,7 +96,7 @@ def plot_classif(stats, filename_base, random_accuracy):
     fig.savefig(f"{filename_base}_classif_metrics.png")
     plt.close(fig)
 
-    
+"""    
 def plot_connectivity_matrices(directory, prefix, max_cols=5, cmap='coolwarm'):
     # Gather all saved connectivity matrices
     files = sorted(glob.glob(os.path.join(directory, f"{prefix}_adj_epoch*.npy")))
@@ -137,4 +137,4 @@ def plot_connectivity_matrices(directory, prefix, max_cols=5, cmap='coolwarm'):
     plt.suptitle("Evolution of Agent Connectivity Over Epochs", fontsize=16, y=1.02)
     plt.savefig(os.path.join(directory, f"{prefix}_connectivity_evolution.png"))
     plt.show()
-
+"""

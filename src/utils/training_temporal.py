@@ -52,6 +52,7 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
 
 def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optional[GradScaler]):
     model.train()
+    aggregator.train()
     use_amp = (device.type == 'cuda') and (scaler is not None)
     autocast_ctx = autocast(device_type='cuda') if use_amp else nullcontext()
     
@@ -93,7 +94,7 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
             )
             optimizer.step()
 
-        total_loss += loss.item()
+        total_loss += loss.item() * B
         total_examples += B
         
     return total_loss / max(total_examples, 1)
@@ -102,6 +103,7 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
 @torch.inference_mode()
 def evaluate(model, aggregator, loader, criterion, device, max_batches=None):
     model.eval()
+    aggregator.eval()
     autocast_ctx = autocast(device_type='cuda') if device.type == 'cuda' else nullcontext()
     
     #loss, accuracy, agreement = [], [], []

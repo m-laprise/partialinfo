@@ -260,6 +260,8 @@ class DistributedDotGAT(nn.Module):
         #x = self.sense(x)
         if self.sensing_masks:
             x = self.sensing_masks(x)
+        else:
+            print("WARNING: No mask applied. Proceeding with full information.")
         # Agent embeddings to internal state
         h = torch.einsum('bij,ijk->bik', x, self.W_embed)
         h = self.prenorm(h)

@@ -415,17 +415,17 @@ class SensingMasks(object):
 
 #=========#
 """
-NUM_MATRICES = 100
-NUM_AGENTS = 125
+NUM_MATRICES = 20
+NUM_AGENTS = 128
 T = 100
 M = 25
-R = 15
+R = 25
 
 groundtruth = GTMatrices(NUM_MATRICES, T, M, R)
 groundtruth[:NUM_MATRICES]
 
 trainingdata = TemporalData(groundtruth)
-sensingmasks = SensingMasks(trainingdata, R, NUM_AGENTS, 0.5)
+sensingmasks = SensingMasks(trainingdata, R, NUM_AGENTS, 0.05)
 
 example = trainingdata[0]['matrix']
 test = sensingmasks(example, global_mask=True)
@@ -453,6 +453,11 @@ axs[2].set_ylabel("Time")
 fig.suptitle(
     f"Example data point: {T} by {M} matrix of rank {R}, Sampling = {sensingmasks.density}", fontsize=14)
 fig.tight_layout()
+plt.show()
+
+fig2, ax2 = plt.subplots(1, 1, figsize=(9, 5))
+for col in range(M):
+    ax2.plot(example.reshape(T, M)[:, col])
 plt.show()
 
 from torch.utils.data import DataLoader

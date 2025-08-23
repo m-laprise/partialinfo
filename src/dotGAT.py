@@ -1,5 +1,11 @@
+"""
+Possible optimization: for einsum operations with batch AND agent dimensions,
+a bmm path may be faster: flatten batch/agent dims and use grouped matmuls.
+to check with profiling.
+"""
+
 import math
-from typing import Union
+from typing import Optional, Union
 
 import networkx as nx
 import torch
@@ -12,10 +18,10 @@ from datagen_temporal import SensingMasks
 
 class DotGATHead(nn.Module):
     """
-    Fused and vectorised distributed attention-message-passing for all agents and all attention head.
+    Vectorised distributed attention-message-passing for all agents and all attention heads.
     Shapes:
         x          : [B, A, Din]
-        W_q / W_k  : [A, Din, H*Dh]  (H = #heads, Dh = out_per_head)
+        W_q / W_k/ W_v_shared : [A, Din, H*Dh]  (H = #heads, Dh = out_per_head)
         W_v        : [Din, H*Dh]     (shared across agents)
     """
     def __init__(self,
@@ -36,7 +42,7 @@ class DotGATHead(nn.Module):
         self.W_q = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
         self.W_k = nn.Parameter(torch.empty_like(self.W_q))
         if self.sharedV:
-            self.W_v_shared = nn.Linear(self.d_hidden, self.d_hidden, bias=True)
+            self.W_v_shared = nn.Linear(self.d_hidden, self.d_hidden, bias=False)
         else:
             self.W_v = nn.Parameter(torch.empty_like(self.W_q))
 
@@ -64,8 +70,8 @@ class DotGATHead(nn.Module):
             # per-slice, to ignore agent dim
             for i in range(self.W_q.size(0)):
                 nn.init.kaiming_normal_(self.W_fwd[i], a=a_val, nonlinearity=nonlin)
-                nn.init.kaiming_normal_(self.W_q[i], a=a_val, nonlinearity=nonlin)
-                nn.init.kaiming_normal_(self.W_k[i], a=a_val, nonlinearity=nonlin)
+                nn.init.xavier_normal_(self.W_q[i])
+                nn.init.xavier_normal_(self.W_k[i])
                 if not self.sharedV:
                     nn.init.kaiming_normal_(self.W_v[i], a=a_val, nonlinearity=nonlin)
                     
@@ -99,7 +105,7 @@ class DotGATHead(nn.Module):
                 attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
             attn_bias = attn_bias.to(device=q.device, dtype=q.dtype)
             
-        if torch.cuda.is_available():
+        if q.is_cuda:
             # Enable Flash first, fall back to Mem-Efficient if Flash is unsupported
             # Error rather than fall back on slow math kernel
             backends_ok = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
@@ -123,16 +129,14 @@ class TrainableSmallWorld(nn.Module):
     """
     Additive attention-bias matrix for DotGAT.
     Only non-frozen positions become nn.Parameters.
-
-    • Non-frozen entries are a learnt parameter vector → scattered every fwd pass  
-    • Frozen entries are hard −∞ (so the kernel never attends to them)  
-    • Initial edges are pre-wired with a positive bias (~3 -> sigmoid ~0.95)  
+    • Non-frozen entries are a learnt parameter vector, scattered every fwd pass  
+    • Frozen entries are hard −∞
 
     Arguments:
     A               : #agents (nodes)
     k, p            : Watts-Strogatz nearest-neighbours & rewiring prob
-    freeze_frac     : fraction **of the absent edges** to keep permanently −∞
-    symmetric       : tie (i,j) and (j,i) parameters
+    freeze_frac     : fraction of the absent edges to keep permanently −∞
+    symmetric       : whether to tie (i,j) and (j,i) parameters
     device          : CPU / CUDA
     """
     @torch.no_grad()
@@ -172,10 +176,10 @@ class TrainableSmallWorld(nn.Module):
         bias = torch.full((self.A, self.A),
                           float('-inf'),
                           device=self.bias_param.device)
-        bias[self.learn_row, self.learn_col] = self.bias_param       # type: ignore
+        bias[self.learn_row, self.learn_col] = self.bias_param # type: ignore
         bias.fill_diagonal_(1.0)
-        if self.symmetric:                                           # keep symmetry
-            bias = torch.maximum(bias, bias.T)
+        if self.symmetric: # keep symmetry in differentiable way with an average
+            bias = 0.5 * (bias + bias.T)
         return bias.unsqueeze(0)
 
 
@@ -191,7 +195,7 @@ class DistributedDotGAT(nn.Module):
         dropout: float,
         adjacency_mode: str,
         message_steps: int,
-        sensing_masks: Union[None, SensingMasks] = None,
+        sensing_masks: Optional[SensingMasks] = None,
         k: int = 4, p: float = 0.0, 
         freeze_zero_frac: float = 1.0
     ):

@@ -22,12 +22,10 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
     Computes cross-entropy loss for stacked logits.
 
     Args:
-        logits (torch.Tensor): Tensor of shape [batch_size, num_agents, m],
-                               where num_agents is the number of stacked predictions,
-                               and m is the number of classes.
+        logits (torch.Tensor): Tensor of shape [batch_size, num_agents, m], where num_agents is the 
+            number of stacked predictions, and m is the number of classes.
         targets (torch.Tensor): Tensor of shape [batch_size], containing class indices.
-        reduction (str): Specifies the reduction to apply to the output:
-                         'none' | 'mean' | 'sum'. Default: 'mean'.
+        reduction (str): Specifies the reduction to apply to the output. Default: 'mean'.
 
     Returns:
         torch.Tensor: Scalar loss (if reduced) or tensor of shape [batch_size, k] (if 'none').
@@ -36,18 +34,14 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
         raise ValueError(f"Expected logits with 3 dimensions [batch_size, k, m], got {logits.shape}")
     if targets.dim() != 1:
         raise ValueError(f"Expected targets with 1 dimension [batch_size], got {targets.shape}")
-
-    batch_size, k, num_classes = logits.shape
-
+    batch_size, k, n_classes = logits.shape
     # Expand and reshape targets
     expanded_targets = targets.unsqueeze(1).expand(-1, k).reshape(-1)  # [batch_size * k]
-    logits_flat = logits.reshape(-1, num_classes)                     # [batch_size * k, m]
-
+    logits_flat = logits.reshape(-1, n_classes)                        # [batch_size * k, m]
     # Compute per-prediction cross-entropy loss
     loss_fn = nn.CrossEntropyLoss(reduction='none')
-    losses = loss_fn(logits_flat, expanded_targets)                   # [batch_size * k]
-    losses = losses.view(batch_size, k)                               # [batch_size, k]
-
+    losses = loss_fn(logits_flat, expanded_targets)                    # [batch_size * k]
+    losses = losses.view(batch_size, k)                                # [batch_size, k]
     # Apply reduction
     if reduction == 'mean':
         return losses.mean()
@@ -68,10 +62,12 @@ def train(model, aggregator, loader, optimizer, criterion,
         torch.compiler.cudagraph_mark_step_begin()
         optimizer.zero_grad(set_to_none=True)
 
-        x = batch['matrix'].to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]
-        target = batch['label'].to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size]
+        x = batch['matrix'].to(device, 
+                               non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]
+        target = batch['label'].to(device, 
+                                   non_blocking=torch.cuda.is_available())  # shape: [batch_size]
         
-        # Conditionally use autocast if on GPU
+        # Conditionally autocast if on GPU
         if torch.cuda.is_available() and scaler is not None:
             with autocast(device_type="cuda"):
                 out = model(x)
@@ -108,8 +104,10 @@ def evaluate(
         if max_batches is not None and i >= max_batches:
             break
 
-        x = batch['matrix'].to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]
-        target = batch['label'].to(device, non_blocking=torch.cuda.is_available())  # shape: [batch_size]
+        x = batch['matrix'].to(
+            device, non_blocking=torch.cuda.is_available())  # shape: [batch_size, t * m]
+        target = batch['label'].to(
+            device, non_blocking=torch.cuda.is_available())  # shape: [batch_size]
 
         out = model(x)
         logits = aggregator(out)
@@ -125,8 +123,7 @@ def evaluate(
         majority_class = torch.argmax(one_hot, dim=1)  # [batch_size]
         vote_accuracy = (majority_class == target).float().mean().item()
         accuracy.append(vote_accuracy)
-        #preds = torch.argmax(logits, dim=1)
-        #accuracy.append(float((preds == target).sum()) / int(target.size(0)))
+        
         agent_agreement = (agent_preds == majority_class.unsqueeze(1)).float().sum(dim=1) / A
         avg_majority_fraction = agent_agreement.mean().item()
         agreement.append(avg_majority_fraction)

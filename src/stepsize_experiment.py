@@ -64,7 +64,7 @@ if __name__ == '__main__':
                         help="Agents share a V embedding matrix")
     parser.add_argument("--no-sharedv", dest="sharedv", action="store_false", 
                         help="Agents have their own V embedding matrices")
-    parser.set_defaults(sharedv=True)
+    parser.set_defaults(sharedv=False)
     
     args = parser.parse_args()
 

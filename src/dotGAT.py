@@ -201,9 +201,9 @@ class DistributedDotGAT(nn.Module):
                                      dropout=dropout, heads=num_heads, sharedV=sharedV)
             
             self.W_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
-            self.b_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden))
+            self.b_fwd1 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
             self.W_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
-            self.b_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden))
+            self.b_fwd2 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
             
             if adjacency_mode == 'learned':
                 self.connect = TrainableSmallWorld(self.n_agents, device, 
@@ -226,14 +226,13 @@ class DistributedDotGAT(nn.Module):
         """
         with torch.no_grad():
             a_val = 1.5
-            nn.init.zeros_(self.b_fwd1)
-            nn.init.zeros_(self.b_fwd2)
             nonlin = 'leaky_relu'
             for i in range(self.W_embed.size(0)):
                 # dims are reversed so this is actually fan_in
                 nn.init.kaiming_normal_(self.W_embed[i], a=a_val, mode='fan_out', nonlinearity=nonlin)
-                nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
-                nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
+                if self.message_steps > 0:
+                    nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
+                    nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
 
     #def sense(self, x):
     #    return x if self.sensing_masks is None else self.sensing_masks(x)
@@ -340,20 +339,17 @@ class CollectiveClassifier(nn.Module):
         self.agent_d_out = agent_outputs_dim
         self.n_classes = m
         self.W_decode = nn.Parameter(
-            torch.empty(size=(self.n_agents, self.agent_d_out, self.n_classes))
+            torch.empty(self.n_agents, self.agent_d_out, self.n_classes)
         )
+        self.b_decode = nn.Parameter(torch.zeros(self.n_agents, self.n_classes))
         self.prenorm = nn.RMSNorm(self.agent_d_out)
-        self.act = nn.SiLU()
         
         self.reset_parameters()  # initialize weights
     
     def reset_parameters(self):
         with torch.no_grad():
-            a_val = 1.5
             for i in range(self.W_decode.size(0)):
-                # Note: dims are reversed so this is actually fan_in (stabilizes forward pass)
-                nn.init.kaiming_normal_(self.W_decode[i], a=a_val, 
-                                         mode='fan_out', nonlinearity='leaky_relu')
+                nn.init.xavier_normal_(self.W_decode[i])
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
@@ -364,10 +360,7 @@ class CollectiveClassifier(nn.Module):
         assert A == self.n_agents and H == self.agent_d_out
 
         agent_outputs = self.prenorm(agent_outputs)
-        agent_preds = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
-        agent_preds = self.act(agent_preds)
+        agent_logits = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode)
+        agent_logits = agent_logits + self.b_decode.unsqueeze(0)
         
-        if self.n_agents == 1:
-            return agent_preds.squeeze(1)
-        else:
-            return agent_preds
+        return agent_logits

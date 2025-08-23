@@ -99,7 +99,7 @@ if __name__ == '__main__':
 
     model = DistributedDotGAT(
         device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
-        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=bool(args.sharedv), dropout=args.dropout, 
+        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, dropout=args.dropout, 
         message_steps=args.steps, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
     ).to(device)
     count_parameters(model)
@@ -128,7 +128,7 @@ if __name__ == '__main__':
     checkpoint_path = f"{file_base}_checkpoint.pt"
     
     #best_loss = float('inf')
-    best = {"loss": float('inf')}
+    best = {"loss": float('inf'), "acc": 0.0}
     patience_counter = 0
 
     # print time at beginning of training
@@ -168,7 +168,7 @@ if __name__ == '__main__':
         fig.show()"""
         #np.save(f"{file_base}_adj_epoch{epoch}.npy", netx)
         
-        improved = val_loss < best["loss"] - 1e-5
+        improved = val_acc > best["acc"] + 1e-5
         
         if improved:
             best.update(loss=val_loss, acc=val_acc, agree=val_agree, epoch=epoch)

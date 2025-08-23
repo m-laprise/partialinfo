@@ -191,8 +191,12 @@ class DistributedDotGAT(nn.Module):
         self.d_hidden = hidden_dim # size of the internal state of each agent
         self.message_steps = message_steps
         self.dropout = dropout
-        self.adjacency_mode = adjacency_mode        
+        self.adjacency_mode = adjacency_mode
+           
         self.sensing_masks = sensing_masks
+        if sensing_masks is not None:
+            self.register_buffer("agent_mask", sensing_masks.masks)         # [A, E], bool
+            self.register_buffer("global_known_mask", sensing_masks.global_known)  # [E], bool
         
         self.W_embed = nn.Parameter(torch.empty(self.n_agents, self.d_in, self.d_hidden))
         
@@ -233,9 +237,6 @@ class DistributedDotGAT(nn.Module):
                 if self.message_steps > 0:
                     nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
                     nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
-
-    #def sense(self, x):
-    #    return x if self.sensing_masks is None else self.sensing_masks(x)
         
     def _mlp(self, h: torch.Tensor) -> torch.Tensor:
         # fused forward projection (one GEMM via einsum); broadcast the bias
@@ -257,9 +258,9 @@ class DistributedDotGAT(nn.Module):
     def forward(self, x):
         # x: [batch, num_agents, d_in]
         # Apply sparse mask to convey partial information to agents
-        #x = self.sense(x)
-        if self.sensing_masks:
-            x = self.sensing_masks(x)
+        if self.sensing_masks is not None:
+            # Broadcast: [1, A, E] multiplies into [B, A, E]
+            x = x * self.agent_mask.unsqueeze(0)    # type: ignore
         else:
             print("WARNING: No mask applied. Proceeding with full information.")
         # Agent embeddings to internal state

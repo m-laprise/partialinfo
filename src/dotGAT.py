@@ -45,14 +45,6 @@ class DotGATHead(nn.Module):
             self.W_v_shared = nn.Linear(self.d_hidden, self.d_hidden, bias=False)
         else:
             self.W_v = nn.Parameter(torch.empty_like(self.W_q))
-
-        self.W_fwd = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
-        self.b_fwd = nn.Parameter(torch.empty(self.n_agents, self.d_hidden))
-
-        self.prenorm = nn.RMSNorm(self.d_hidden)
-        self.postnorm = nn.RMSNorm(self.d_hidden)
-        
-        self.act = nn.SiLU()
         
         self.reset_parameters()  # initialize weights
     
@@ -62,19 +54,16 @@ class DotGATHead(nn.Module):
         normal 2D linear weight
         """
         with torch.no_grad():
-            # Note: gain decreases as the a value increases, which narrows the init bounds (smaller weight magnitude)
+            # Note: gain decreases as the a value increases, which narrows the init bounds
             # gain = √2 / √(1 + a²); bound = gain * (√3 / √fan_mode)
             a_val = 1.5
-            nn.init.zeros_(self.b_fwd)
             nonlin = 'leaky_relu'
             # per-slice, to ignore agent dim
             for i in range(self.W_q.size(0)):
-                nn.init.kaiming_normal_(self.W_fwd[i], a=a_val, nonlinearity=nonlin)
                 nn.init.xavier_normal_(self.W_q[i])
                 nn.init.xavier_normal_(self.W_k[i])
                 if not self.sharedV:
                     nn.init.kaiming_normal_(self.W_v[i], a=a_val, nonlinearity=nonlin)
-                    
             if self.sharedV:
                 self.W_v_shared.reset_parameters()
     
@@ -96,7 +85,7 @@ class DotGATHead(nn.Module):
     
     def forward(self, x: torch.Tensor, attn_bias: torch.Tensor | None = None):
         # x: [B, A, Din];   attn_bias: [A, A] or [1, A, A]
-        x = self.prenorm(x)
+        #x = self.prenorm(x)
         q, k, v = self._project_qkv(x)
         dropout_p = self.dropout if self.training else 0.0
         if attn_bias is not None:
@@ -117,12 +106,8 @@ class DotGATHead(nn.Module):
             out = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_bias, dropout_p=dropout_p, is_causal=False
             )                                # [B, H, A, Dh]
-            
         out = out.transpose(1, 2).reshape(x.size(0), -1, self.heads * self.head_dim)
-        out = self.postnorm(out)                                    # post-norm
-        # fused forward projection (one GEMM via einsum); broadcast the bias
-        out = torch.einsum('bij,ijk->bik', out, self.W_fwd) + self.b_fwd.unsqueeze(0)
-        return self.act(out)
+        return out
 
 
 class TrainableSmallWorld(nn.Module):
@@ -203,22 +188,33 @@ class DistributedDotGAT(nn.Module):
         self.n, self.m = n, m
         self.d_in = input_dim   # = n * m
         self.n_agents = num_agents
-        self.d_out = hidden_dim # size of the internal state of each agent
+        self.d_hidden = hidden_dim # size of the internal state of each agent
         self.message_steps = message_steps
         self.dropout = dropout
         self.adjacency_mode = adjacency_mode        
         self.sensing_masks = sensing_masks
         
-        self.W_embed = nn.Parameter(torch.empty(size=(self.n_agents, self.d_in, self.d_out)))
+        self.W_embed = nn.Parameter(torch.empty(self.n_agents, self.d_in, self.d_hidden))
         
         if self.message_steps > 0:
-            self.gat_head = DotGATHead(self.n_agents, self.d_out, self.d_out, 
-                                       dropout=dropout, heads=num_heads, sharedV=sharedV)
+            self.DotGAT = DotGATHead(self.n_agents, self.d_hidden, self.d_hidden, 
+                                     dropout=dropout, heads=num_heads, sharedV=sharedV)
+            
+            self.W_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+            self.b_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden))
+            self.W_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+            self.b_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden))
+            
             if adjacency_mode == 'learned':
                 self.connect = TrainableSmallWorld(self.n_agents, device, 
                                                    k=k, p=p, freeze_frac=freeze_zero_frac)
-        self.outernorm = nn.RMSNorm(self.d_out)
-        self.innernorm = nn.RMSNorm(self.d_out)
+        
+        self.residual_drop1 = nn.Dropout(self.dropout)
+        self.residual_drop2 = nn.Dropout(self.dropout)
+        
+        self.prenorm = nn.RMSNorm(self.d_hidden)
+        self.attnorm = nn.RMSNorm(self.d_hidden)
+        self.mlpnorm = nn.RMSNorm(self.d_hidden)
         self.act    = nn.SiLU()            # fused Swish
         
         self.reset_parameters()  # initialize weights
@@ -230,31 +226,44 @@ class DistributedDotGAT(nn.Module):
         """
         with torch.no_grad():
             a_val = 1.5
+            nn.init.zeros_(self.b_fwd1)
+            nn.init.zeros_(self.b_fwd2)
+            nonlin = 'leaky_relu'
             for i in range(self.W_embed.size(0)):
                 # dims are reversed so this is actually fan_in
-                nn.init.kaiming_normal_(self.W_embed[i], a=a_val, 
-                                         mode='fan_out', nonlinearity='leaky_relu')
+                nn.init.kaiming_normal_(self.W_embed[i], a=a_val, mode='fan_out', nonlinearity=nonlin)
+                nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
 
-    def sense(self, x):
-        return x if self.sensing_masks is None else self.sensing_masks(x)
+    #def sense(self, x):
+    #    return x if self.sensing_masks is None else self.sensing_masks(x)
         
+    def _mlp(self, h: torch.Tensor) -> torch.Tensor:
+        # fused forward projection (one GEMM via einsum); broadcast the bias
+        h = torch.einsum('bij,ijk->bik', h, self.W_fwd1) + self.b_fwd1.unsqueeze(0)
+        h = self.act(h)
+        h = torch.einsum('bij,ijk->bik', h, self.W_fwd2) + self.b_fwd2.unsqueeze(0)
+        return h
+    
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
         if self.adjacency_mode == 'learned':
             attn_bias = self.connect()
         else:
             attn_bias = None
         for _ in range(self.message_steps):
-            h = h + self.gat_head(h, attn_bias)
-            h = self.innernorm(h)
-        return self.act(h)
+            h = h + self.residual_drop1(self.DotGAT(self.attnorm(h), attn_bias))
+            h = h + self.residual_drop2(self._mlp(self.mlpnorm(h)))
+        return h
     
     def forward(self, x):
         # x: [batch, num_agents, d_in]
         # Apply sparse mask to convey partial information to agents
-        x = self.sense(x)
+        #x = self.sense(x)
+        if self.sensing_masks:
+            x = self.sensing_masks(x)
         # Agent embeddings to internal state
         h = torch.einsum('bij,ijk->bik', x, self.W_embed)
-        h = self.outernorm(h)
+        h = self.prenorm(h)
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
         if self.message_steps > 0:

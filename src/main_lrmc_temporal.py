@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
 from dotGAT import CollectiveClassifier, DistributedDotGAT
-from utils.logging import log_training_run
+from utils.logging import atomic_save, log_training_run, snapshot
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif
 from utils.training_temporal import (
@@ -28,6 +28,8 @@ from utils.training_temporal import (
 
 if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -88,13 +90,25 @@ if __name__ == '__main__':
     
     num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
     print(f"Number of workers: {num_workers}")
+    pin = torch.cuda.is_available()
+    persistent = num_workers > 0
     train_loader = DataLoader(
-        train_data, batch_size=args.batch_size, shuffle=True,
-        pin_memory=torch.cuda.is_available(), num_workers=num_workers,
+        train_data, 
+        batch_size=args.batch_size, 
+        shuffle=True,
+        pin_memory=pin, 
+        num_workers=num_workers,
+        persistent_workers=persistent,
+        prefetch_factor=2 if persistent else None,
+        drop_last=True,
     )
     val_loader = DataLoader(
-        val_data, batch_size=args.batch_size, 
-        pin_memory=torch.cuda.is_available(), num_workers=num_workers,
+        val_data, 
+        batch_size=args.batch_size, 
+        pin_memory=pin, 
+        num_workers=num_workers,
+        persistent_workers=persistent,
+        prefetch_factor=2 if persistent else None,
     )
 
     model = DistributedDotGAT(
@@ -128,11 +142,13 @@ if __name__ == '__main__':
     checkpoint_path = f"{file_base}_checkpoint.pt"
     
     #best_loss = float('inf')
-    best = {"loss": float('inf'), "acc": 0.0}
+    best = {"loss": float('inf'), "acc": float('-inf')}
     patience_counter = 0
 
     # print time at beginning of training
     start = datetime.now()
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
     print(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
     
     for epoch in range(1, args.epochs + 1):
@@ -150,8 +166,11 @@ if __name__ == '__main__':
         stats["val_agreement"].append(val_agree)
         
         if epoch == 1:
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
             t1 = datetime.now()
-            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")        
+            print(f"Time elapsed for first epoch: {(t1 - start).total_seconds()} seconds.")
+            
         if epoch % 10 == 0 or epoch == 1:
             print(f"Ep {epoch:03d}. ",
                   f"T loss: {train_loss:.2e} | T acc: {t_acc:.2f} | T % maj: {t_agree:.2f} | ",
@@ -168,55 +187,56 @@ if __name__ == '__main__':
         fig.show()"""
         #np.save(f"{file_base}_adj_epoch{epoch}.npy", netx)
         
-        improved = val_acc > best["acc"] + 1e-5
+        improved = (val_acc > best["acc"] + 1e-5) | (val_acc >= best["acc"] - 1e-2 and val_loss < best["loss"] - 1e-5)
         
-        if improved:
+        if improved or epoch == 1:
             best.update(loss=val_loss, acc=val_acc, agree=val_agree, epoch=epoch)
+            atomic_save(snapshot(model, aggregator, epoch, args), checkpoint_path)
             patience_counter = 0
-            torch.save({
-                "model": model.state_dict(),
-                "aggregator": aggregator.state_dict(),
-                #"optimizer": optimizer.state_dict(),
-                #"scheduler": scheduler.state_dict(),
-                "epoch": epoch,
-                "args": vars(args),
-            }, checkpoint_path)
-            if val_acc == 1.0:
-                print(f"Early stopping at epoch {epoch}; validation accuracy is 100%.")
-                break
         else:
             patience_counter += 1
-            if val_loss > 10:
-                print(f"Early stopping at epoch {epoch}; validation loss is diverging.")
-                break
-        #    if patience_counter >= args.patience:
-        #        print(f"Early stopping at epoch {epoch}; no improvement for {args.patience} epochs.")
-        #        break
+            
+        if val_acc == 1.0:
+            print(f"Early stopping at epoch {epoch}; validation accuracy is 100%.")
+            break
+        if val_loss > 10:
+            print(f"Early stopping at epoch {epoch}; validation loss is diverging.")
+            break
+    #    if args.patience > 0 and patience_counter >= args.patience:
+    #        print(f"Early stopping at epoch {epoch}; no improvement for {args.patience} epochs.")
+    #        break
         
     end = datetime.now()
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
     print(f"End time: {end.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Training time: {(end - start).total_seconds() / 60} minutes.")
+    print(f"Training time: {(end - start).total_seconds() / 60:.4f} minutes.")
     
     # Clear memory (avoid OOM) and load best model
     optimizer.zero_grad(set_to_none=True)
     gc.collect()
     if device.type == 'cuda':
         torch.cuda.empty_cache()
-        
-    state = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(state["model"])
-    aggregator.load_state_dict(state["aggregator"])
-    model.to(device)
-    aggregator.to(device)
-    print(f"Loaded best model (epoch {state['epoch']}) from checkpoint.")
+    
+    if os.path.exists(checkpoint_path):
+        state = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(state["model"])
+        aggregator.load_state_dict(state["aggregator"])
+        model.to(device)
+        aggregator.to(device)
+        print(f"Loaded best model (epoch {state['epoch']}) from checkpoint.")
+    else:
+        print("No checkpoint found; using current in-memory weights.")
 
     random_accuracy = 1.0 / args.m
     plot_classif(stats, file_base, random_accuracy)
     
     # Final test evaluation on fresh data
     test_loader = DataLoader(
-        test_data, batch_size=args.batch_size, 
-        pin_memory=torch.cuda.is_available(), num_workers=num_workers, 
+        test_data, 
+        batch_size=args.batch_size, 
+        pin_memory=pin, 
+        num_workers=num_workers
     )
     test_loss, test_acc, test_agree = evaluate(model, aggregator, test_loader, criterion, device)
     print("Test Set Performance | ",

@@ -1,10 +1,29 @@
 
+import os
 import platform
 import subprocess
+import tempfile
 
 import psutil
 import torch
 
+
+def atomic_save(state, path: str):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp_ckpt_", suffix=".pt")
+    os.close(fd)
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def snapshot(model, aggregator, epoch, args):
+    return {
+        "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        "aggregator": {k: v.detach().cpu() for k, v in aggregator.state_dict().items()},
+        "epoch": epoch,
+        "args": vars(args),
+    }
+    
 
 def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_agreement, start_time, end_time, model, aggregator):
     log_file = f"{filename_base}_log.txt"
@@ -25,7 +44,7 @@ def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_
 
     # Hardware Info
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-    cuda_version = torch.version.cuda if torch.cuda.is_available() else "N/A"
+    cuda_version = torch.version.cuda if torch.cuda.is_available() else "N/A"       # type: ignore
     num_gpus = torch.cuda.device_count()
     cpu_name = platform.processor()
     ram_gb = round(psutil.virtual_memory().total / (1024**3), 2)

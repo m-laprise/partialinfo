@@ -13,6 +13,6 @@
 
 module purge
 module load cudatoolkit/12.8
-nvidia-smi > "nvidia-smi-${SLURM_JOB_ID}.txt"
+nvidia-smi > "./results/nvidia-smi-${SLURM_JOB_ID}.txt"
 
-uv run ./src/stepsize_experiment.py --t 50 --m 25 --r 25 --density 0.5 --num_agents 128 --hidden_dim 384  --lr 1e-4 --epochs 150 --batch_size 200 --train_n 4000 --val_n 300 --test_n 300 --nres 10
+uv run ./src/stepsize_experiment.py --t 50 --m 25 --r 25 --density 0.5 --num_agents 128 --hidden_dim 384 --lr 1e-4 --epochs 150 --batch_size 200 --train_n 5000 --val_n 400 --test_n 400 --nres 10

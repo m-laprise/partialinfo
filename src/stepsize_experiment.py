@@ -115,7 +115,7 @@ if __name__ == '__main__':
     )
     
     random_accuracy = 1.0 / args.m
-    step_sizes_to_test = [0,1,2] #[0, 1, 2, 3, 4, 5, 10, 15]
+    step_sizes_to_test = [0, 1, 2, 3, 4, 5, 10, 15]
     
     results_train_loss = []
     results_train_accuracy = []

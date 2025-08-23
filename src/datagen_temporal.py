@@ -301,10 +301,6 @@ class SensingMasks(object):
         self.future_only = future_only
         self.masks, self.global_known = self._generate()
         
-    def to(self, device):
-        self.masks = self.masks.to(device)
-        self.global_known = self.global_known.to(device)
-        
     def __getitem__(self, idx):
         assert idx < self.num_agents, f"Agent index {idx} is out of range"
         return self.masks[idx, :] if idx != -1 else self.global_known

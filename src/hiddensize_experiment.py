@@ -113,7 +113,7 @@ if __name__ == '__main__':
     )
     
     random_accuracy = 1.0 / args.m
-    sizes_to_test = [32, 64] #[64, 128, 256, 384, 512, 640, 768, 1024]
+    sizes_to_test = [64, 128, 256, 384, 512, 640, 768, 1024]
     
     results_train_loss = []
     results_train_accuracy = []

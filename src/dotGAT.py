@@ -200,7 +200,7 @@ class DistributedDotGAT(nn.Module):
         
         self.W_embed = nn.Parameter(torch.empty(self.n_agents, self.d_in, self.d_hidden))
         
-        if self.message_steps > 0:
+        if self.message_steps > 0  and num_agents > 1:
             self.DotGAT = DotGATHead(self.n_agents, self.d_hidden, self.d_hidden, 
                                      dropout=dropout, heads=num_heads, sharedV=sharedV)
             
@@ -269,7 +269,7 @@ class DistributedDotGAT(nn.Module):
         h = self.prenorm(h)
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
-        if self.message_steps > 0:
+        if self.message_steps > 0 and self.n_agents > 1:
             h = self._message_passing(h)
         return h
 

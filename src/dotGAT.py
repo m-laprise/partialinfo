@@ -213,8 +213,8 @@ class DistributedDotGAT(nn.Module):
             self.mlpnorm = nn.RMSNorm(self.d_hidden)
             
             if adjacency_mode == 'learned':
-                self.connect = TrainableSmallWorld(self.n_agents, device, 
-                                                   k=k, p=p, freeze_frac=freeze_zero_frac)
+                self.connect = TrainableSmallWorld(self.n_agents, device, k=min(k, self.n_agents - 1), 
+                                                   p=p, freeze_frac=freeze_zero_frac)
         
         self.residual_drop1 = nn.Dropout(self.dropout)
         self.residual_drop2 = nn.Dropout(self.dropout)
@@ -235,7 +235,7 @@ class DistributedDotGAT(nn.Module):
             for i in range(self.W_embed.size(0)):
                 # dims are reversed so this is actually fan_in
                 nn.init.kaiming_normal_(self.W_embed[i], a=a_val, mode='fan_out', nonlinearity=nonlin)
-                if self.message_steps > 0:
+                if self.message_steps > 0 and self.n_agents > 1:
                     nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
                     nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
         

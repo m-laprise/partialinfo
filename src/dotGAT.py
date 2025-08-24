@@ -209,6 +209,9 @@ class DistributedDotGAT(nn.Module):
             self.W_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
             self.b_fwd2 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
             
+            self.attnorm = nn.RMSNorm(self.d_hidden)
+            self.mlpnorm = nn.RMSNorm(self.d_hidden)
+            
             if adjacency_mode == 'learned':
                 self.connect = TrainableSmallWorld(self.n_agents, device, 
                                                    k=k, p=p, freeze_frac=freeze_zero_frac)
@@ -217,8 +220,6 @@ class DistributedDotGAT(nn.Module):
         self.residual_drop2 = nn.Dropout(self.dropout)
         
         self.prenorm = nn.RMSNorm(self.d_hidden)
-        self.attnorm = nn.RMSNorm(self.d_hidden)
-        self.mlpnorm = nn.RMSNorm(self.d_hidden)
         self.act    = nn.SiLU()            # fused Swish
         
         self.reset_parameters()  # initialize weights

@@ -50,9 +50,11 @@ if __name__ == '__main__':
                         help='Number of attention heads in the message passing layers') 
     parser.add_argument('--adjacency_mode', type=str, default='learned', choices=['none', 'learned'], 
                         help='Whether adjacency matrix for message-passing is all-to-all or learned')
+    parser.add_argument('--steps', type=int, default=5, 
+                        help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     # Training hyperparameters
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout probability during training')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Initial learning rate')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
     parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=200, help='Batch size for training')
     parser.add_argument('--patience', type=int, default=0, help='Early stopping patience')
@@ -77,28 +79,15 @@ if __name__ == '__main__':
         torch.backends.cudnn.benchmark = True
     
     with torch.no_grad():  
-        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
         val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
         test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
-        train_data = TemporalData(train_GT)
         val_data = TemporalData(val_GT, verbose=False)
         test_data = TemporalData(test_GT, verbose=False)
-        sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
     
     num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
     print(f"Number of workers: {num_workers}")
     pin = torch.cuda.is_available()
     persistent = num_workers > 0
-    train_loader = DataLoader(
-        train_data, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        pin_memory=pin, 
-        num_workers=num_workers,
-        persistent_workers=persistent,
-        prefetch_factor=2 if persistent else None,
-        drop_last=True,
-    )
     val_loader = DataLoader(
         val_data, 
         batch_size=args.batch_size, 
@@ -115,7 +104,7 @@ if __name__ == '__main__':
     )
     
     random_accuracy = 1.0 / args.m
-    step_sizes_to_test = [0, 1, 2, 3, 4, 5, 10, 15]
+    data_sizes_to_test = [500, 1000, 2000, 4000, 8000, 16000]
     
     results_train_loss = []
     results_train_accuracy = []
@@ -124,13 +113,26 @@ if __name__ == '__main__':
     results_test_accuracy = []
     results_test_agreement = []
     
-    for stepsize in step_sizes_to_test:
+    for datasize in data_sizes_to_test:
         torch._dynamo.reset()
-          
+        with torch.no_grad():  
+            train_GT = GTMatrices(N=datasize, t=args.t, m=args.m, r=args.r, realizations = args.nres)
+            train_data = TemporalData(train_GT)
+            sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
+        train_loader = DataLoader(
+            train_data, 
+            batch_size=args.batch_size, 
+            shuffle=True,
+            pin_memory=pin, 
+            num_workers=num_workers,
+            persistent_workers=persistent,
+            prefetch_factor=2 if persistent else None,
+            drop_last=True,
+        )
         model = DistributedDotGAT(
             device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
             num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, dropout=args.dropout, 
-            message_steps=stepsize, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
+            message_steps=args.steps, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
         ).to(device)
         aggregator = CollectiveClassifier(
             num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
@@ -209,7 +211,7 @@ if __name__ == '__main__':
         if device.type == 'cuda':
             torch.cuda.synchronize()
         print(f"End time: {end.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Training time for step size {stepsize}: {(end - start).total_seconds() / 60:.4f} minutes.")
+        print(f"Training time for data size {datasize}: {(end - start).total_seconds() / 60:.4f} minutes.")
         
         # Clear memory (avoid OOM) and load best model
         optimizer.zero_grad(set_to_none=True)
@@ -231,7 +233,7 @@ if __name__ == '__main__':
         
         # Final test evaluation on fresh data
         test_loss, test_acc, test_agree = evaluate(model, aggregator, test_loader, criterion, device)
-        print(f"Test Set Performance for step size {stepsize}: | ",
+        print(f"Test Set Performance for data size {datasize}: | ",
               f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
 
         log_training_run(
@@ -249,33 +251,33 @@ if __name__ == '__main__':
     # Plot results
     plt.style.use('bmh')
     fig, axs = plt.subplots(1, 3, figsize=(11.5, 4))
-    axs[0].plot(step_sizes_to_test, np.log(results_train_loss), label="Train Loss", marker="o")
-    axs[0].plot(step_sizes_to_test, np.log(results_test_loss), label="Test Loss", marker="o")
-    axs[1].plot(step_sizes_to_test, results_train_accuracy, label="Train Accuracy", marker="o")
-    axs[1].plot(step_sizes_to_test, results_test_accuracy, label="Test Accuracy", marker="o")
-    axs[2].plot(step_sizes_to_test, results_train_agreement, label="Train Agreement", marker="o", linestyle='dotted')
-    axs[2].plot(step_sizes_to_test, results_test_agreement, label="Test Agreement", marker="o", linestyle='dotted')
+    data_sizes = np.log10(data_sizes_to_test)
+    axs[0].plot(data_sizes, np.log(results_train_loss), label="Train Loss", marker="o")
+    axs[0].plot(data_sizes, np.log(results_test_loss), label="Test Loss", marker="o")
+    axs[1].plot(data_sizes, results_train_accuracy, label="Train Accuracy", marker="o")
+    axs[1].plot(data_sizes, results_test_accuracy, label="Test Accuracy", marker="o")
+    axs[2].plot(data_sizes, results_train_agreement, label="Train Agreement", marker="o", linestyle='dotted')
+    axs[2].plot(data_sizes, results_test_agreement, label="Test Agreement", marker="o", linestyle='dotted')
     axs[1].axhline(y=random_accuracy, label="Random guessing", color='tab:grey', linestyle='--')
     axs[0].set_ylabel("Log Loss")
     axs[1].set_ylabel("Accuracy")
     axs[2].set_ylabel("Proportion of agents in plurality")
-    #axs[0].set_ylim(0, None)
-    axs[1].set_ylim(0, 1)
-    axs[2].set_ylim(0, 1)
+    axs[1].set_ylim(0, 1.05)
+    axs[2].set_ylim(0, 1.05)
     for ax in axs:
-        ax.set_xlabel("Message Passing Steps")
+        ax.set_xlabel("Log10 nb training data points")
         ax.legend()
         ax.grid(True)
-    fig.suptitle(f"Training performance after {args.epochs} epochs, by number of message-passing steps")
+    fig.suptitle(f"Training performance after {args.epochs} epochs, by quantity of data")
     txt = f"Hyperparameters: " \
         f"T = {args.t}, m = {args.m}, r = {args.r}, density = {args.density}, " \
         f"num_agents = {args.num_agents}, hidden_dim = {args.hidden_dim}, att_heads = {args.att_heads}\n" \
         f"dropout = {args.dropout}, init_lr = {args.lr}, batch_size = {args.batch_size}, " \
-        f"train_n = {args.train_n}, test_n = {args.test_n}, nres = {args.nres}."
+        f"steps = {args.steps}, test_n = {args.test_n}, nres = {args.nres}."
     plt.figtext(0.5, 0.0, txt, ha='center', va ='top', fontsize=9)
     fig.subplots_adjust(bottom=0.3)
     fig.tight_layout()
     
-    fig.savefig(f"results/nsteps_experiment_{args.lr:.0e}.png", bbox_inches="tight")
+    fig.savefig("results/data_experiment.png", bbox_inches="tight")
     plt.close(fig)
     

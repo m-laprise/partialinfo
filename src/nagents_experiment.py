@@ -83,7 +83,7 @@ if __name__ == '__main__':
         test_data = TemporalData(test_GT, verbose=False)
     
     random_accuracy = 1.0 / args.m
-    sizes_to_test = [1, 2, 4, 8, 16, 32, 64, 100, 128, 200, 256, 512, 800, 1024]
+    sizes_to_test = [1, 2, 4, 8, 16, 32, 64, 100, 128, 192, 256, 512, 768, 1024]
     
     results_train_loss = []
     results_train_accuracy = []

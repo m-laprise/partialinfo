@@ -15,4 +15,4 @@ module purge
 module load cudatoolkit/12.8
 nvidia-smi > "./results/nvidia-smi-${SLURM_JOB_ID}.txt"
 
-uv run ./src/nagents_experiment.py --t 50 --m 25 --r 25 --num_agents 128 --hidden_dim 128 --lr 1e-4 --epochs 200 --batch_size 200 --steps 5 --train_n 10000 --val_n 400 --test_n 400 --nres 10 --no-sharedv
+uv run ./src/density_experiment.py --t 50 --m 25 --r 25 --num_agents 128 --hidden_dim 128 --lr 1e-4 --epochs 200 --batch_size 200 --steps 5 --train_n 10000 --val_n 400 --test_n 400 --nres 10 --no-sharedv

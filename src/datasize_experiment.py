@@ -84,7 +84,7 @@ if __name__ == '__main__':
         val_data = TemporalData(val_GT, verbose=False)
         test_data = TemporalData(test_GT, verbose=False)
     
-    num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
+    num_workers = min(os.cpu_count() // 2, 8) if torch.cuda.is_available() else 0 # type: ignore
     print(f"Number of workers: {num_workers}")
     pin = torch.cuda.is_available()
     persistent = num_workers > 0

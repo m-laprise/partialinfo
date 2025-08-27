@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,22 +25,92 @@ def matern_covariance(t: int,
     np.fill_diagonal(vcov, vcov.diagonal() + jitter) # type: ignore
     return torch.as_tensor(vcov)
 
+
 @torch.no_grad()
-def _random_ts_params(mode: int, *, nu_low: float = 0.5, nu_high: float = 8.0) -> Tuple[float, float]:
+def _random_matern_params(mode: int, *, nu_low: float = 0.5, nu_high: float = 8.0) -> Dict[str, float]:
     """
     Generate random time series parameters for slow, medium, or fast dynamics.
     """    
     if mode not in {0, 1, 2}:
         raise ValueError("mode must be 0 (slow), 1 (medium) or 2 (fast)")
     scale_ranges = {
-        0: (50.0, 100.0),   # slow
-        1: (10.0, 20.0),    # medium
+        0: (20.0, 40.0),   # slow
+        1: (5.0, 15.0),    # medium
         2: (1.0, 4.0),      # fast
     }
     scale_low, scale_high = scale_ranges[mode]
     scale = (torch.rand(()) * (scale_high - scale_low) + scale_low).item()
     nu    = (torch.rand(()) * (nu_high - nu_low) + nu_low).item() 
-    return scale, nu
+    return {'length_scale': scale, 'nu': nu}
+
+
+@torch.no_grad()
+def _random_cauchy_params(mode: int) -> Dict[str, float]:
+    """
+    Generate random time series parameters for very long, long, or no memory.
+    
+    Note the following reference combinations:
+     - α=2.0, β=1.0: Gaussian-like
+     - α=0.5, β=2.0: fast decay, rough
+     - α=2.0, β=2.0: fast decay, smooth
+     - α=0.5, β=0.2: long memory, rough
+     - α=2.0, β=0.2: long memory, smooth
+    """    
+    if mode not in {0, 1, 2}:
+        raise ValueError("mode must be 0 (long-range), 1 (medium-range) or 2 (fast decay)")
+    beta_ranges = {
+        0: (1e-5, 0.5),
+        1: (0.5, 0.9),
+        2: (1.0, 1.5),
+    }
+    beta_low, beta_high = beta_ranges[mode]
+    alpha_low, alpha_high = (0.75, 2)
+    beta  = (torch.rand(()) * (beta_high - beta_low) + beta_low).item()
+    alpha = (torch.rand(()) * (alpha_high - alpha_low) + alpha_low).item() 
+    return {'alpha': alpha, 'beta': beta}
+
+
+@torch.no_grad()
+def cauchy_correlation(h, *, alpha, beta):
+    if alpha <= 0 or alpha > 2:
+        raise ValueError("alpha ∈ (0, 2]")
+    if beta < 0:
+        raise ValueError("beta > 0")
+    
+    return (1 + np.abs(h)**alpha)**(-beta/alpha)
+
+
+@torch.no_grad()
+def cauchy_covariance(t, *, alpha, beta, sigma2=1.0):
+    """
+    Build covariance matrix for Cauchy class process.
+    
+    Parameters:
+    t : int, number of time points
+    alpha : float, in (0, 2], controls smoothness
+    beta : float, > 0, controls decay rate
+    sigma2 : float, marginal variance
+    """
+    vcov = torch.zeros((t, t))
+    for i in range(t):
+        for j in range(t):
+            if i <= j:
+                h = i - j
+                vcov[i, j] = vcov[j,i] = sigma2 * cauchy_correlation(h / 4, alpha=alpha, beta=beta)
+    # Add small diagonal term for numerical stability
+    vcov += 1e-8 * torch.eye(t)
+    return vcov
+
+
+def hurst_coef(beta):
+    if beta < 1:
+        return 1 - beta/2
+    else:
+        return None
+
+
+def fractal_dim(alpha, ndim=1):
+    return ndim + 1 - alpha/2
 
 
 def _even_partition(total: int, k: int) -> List[int]:
@@ -50,74 +120,97 @@ def _even_partition(total: int, k: int) -> List[int]:
     base, extra = divmod(total, k)
     return [base + (i < extra) for i in range(k)]
 
+
 @torch.no_grad()
 def _generate_V(r: int,
                 m: int,
-                row_sizes: List[int],
+                row_sizes: Optional[List[int]] = None,
                 *,
                 strong_mean: float = 3.0,
                 strong_std:  float = 0.75,
                 weak_mean:  float = 0.0,
                 weak_std:   float = 1.0,
-                shuffle_columns: bool = True) -> torch.Tensor:
+                shuffle_columns: bool = True,
+                vtype: str = 'block') -> torch.Tensor:
     if r <= 0 or m <= 0:
         raise ValueError("r and m must be positive integers")
     if r > m:
         raise ValueError("r should not exceed m for block construction")
-    # determine block sizes
-    if not row_sizes:
-        row_sizes = _even_partition(r, min(r, 3))
-    col_sizes = _even_partition(m, min(m, 3))   # three column-blocks
-    # build logits tensor
-    logits = torch.normal(mean=weak_mean, std=weak_std, size=(r, m))
-    # mark the starts of each column block once for efficiency
-    col_starts = [0]                    
-    for sz in col_sizes[:-1]:             
-        col_starts.append(col_starts[-1] + sz)
-    # overwrite the diagonal blocks with “high” logits
-    row_start = 0
-    for block in range(len(row_sizes)):
-        row_end = row_start + row_sizes[block]
-        col_start = col_starts[block]
-        col_end   = col_start + col_sizes[block]
-        # Set strong logits for the diagonal block
-        logits[row_start:row_end, 
-               col_start:col_end] = torch.normal(
-                   mean=strong_mean,
-                   std=strong_std,
-                   size=(row_sizes[block], col_sizes[block])
-               )
-        row_start = row_end
-    # optional column shuffling
-    if shuffle_columns:
-        perm = torch.randperm(m)
-        logits = logits[:, perm]
-    # softmax over rows
-    V = torch.softmax(logits, dim=0) 
+    if vtype not in ['block', 'random']:
+        raise ValueError("vtype must be 'block' or 'random'")
+    if vtype == 'block':
+        # determine block sizes
+        if row_sizes is None:
+            row_sizes = _even_partition(r, min(r, 3))
+        col_sizes = _even_partition(m, min(m, 3))   # three column-blocks
+        # build logits tensor
+        logits = torch.normal(mean=weak_mean, std=weak_std, size=(r, m))
+        # mark the starts of each column block once for efficiency
+        col_starts = [0]                    
+        for sz in col_sizes[:-1]:             
+            col_starts.append(col_starts[-1] + sz)
+        # overwrite the diagonal blocks with “high” logits
+        row_start = 0
+        for block in range(len(row_sizes)):
+            row_end = row_start + row_sizes[block]
+            col_start = col_starts[block]
+            col_end   = col_start + col_sizes[block]
+            # Set strong logits for the diagonal block
+            logits[row_start:row_end, 
+                col_start:col_end] = torch.normal(
+                    mean=strong_mean,
+                    std=strong_std,
+                    size=(row_sizes[block], col_sizes[block])
+                )
+            row_start = row_end
+        # optional column shuffling
+        if shuffle_columns:
+            perm = torch.randperm(m)
+            logits = logits[:, perm]
+        # softmax over rows
+        V = torch.softmax(logits, dim=0) 
+    elif vtype == 'random':
+        V = torch.randn(r, m) + torch.ones(r, m) 
+        V /= V.sum(dim=0, keepdim=True)
     return V.T
 
+
 @torch.no_grad()
-def _generate_DGP(t: int, m: int, r: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def _generate_DGP(
+    t: int, m: int, r: int, kernel: str, vtype: str, **kernel_kwargs
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Define a random data-generating process comprised of the following parameters:
-    - r Matérn autocovariance matrices of size t x t (one for each column of U)
+    - r autocovariance matrices of size t x t (one for each column of U)
     - A mixing weight matrix V of size r x m
-    with a shared division of the rank r into up to three blocks representing slow, medium, and fast
+    with a division of the rank r into up to three blocks representing different
     dynamics (ie, a list of integers r1, r2, r3 such that r = r1 + r2 + r3)
     """
+    if kernel not in ['matern', 'cauchy', 'whitenoise']:
+        raise NotImplementedError(f"Kernel {kernel} not implemented")
     nblocks = min(r, 3)           # 1, 2, or 3 blocks
     block_sizes: List[int] = _even_partition(r, nblocks)
     modes = torch.repeat_interleave(torch.arange(nblocks), torch.tensor(block_sizes))
-    vcov_list = [
-        matern_covariance(t, *_random_ts_params(int(mode)))
-        for mode in modes
-    ]
-    vcovU = torch.stack(vcov_list, dim=0)  # r x t x t 
-    V = _generate_V(r, m, block_sizes)
+    if kernel == 'matern':
+        vcov_list = [
+            matern_covariance(t, **_random_matern_params(int(mode)), **kernel_kwargs)
+            for mode in modes
+        ]
+        vcovU = torch.stack(vcov_list, dim=0)  # r x t x t 
+    elif kernel == 'cauchy':
+        vcov_list = [
+            cauchy_covariance(t, **_random_cauchy_params(int(mode)), **kernel_kwargs)
+            for mode in modes
+        ]
+        vcovU = torch.stack(vcov_list, dim=0)  # r x t x t 
+    elif kernel == 'whitenoise':
+        vcovU = torch.eye(t).expand(r, t, t)
+    V = _generate_V(r, m, block_sizes, vtype=vtype)
     return vcovU, V
 
+
 @torch.no_grad()
-def _gen_U_col(vcovU: torch.Tensor, *, offset: float = 2.0) -> torch.Tensor:
+def _gen_U_col(vcovU: torch.Tensor, *, offset: float) -> torch.Tensor:
     t = vcovU.shape[1]
     mvn = torch.distributions.MultivariateNormal(
         loc=torch.full(
@@ -128,13 +221,18 @@ def _gen_U_col(vcovU: torch.Tensor, *, offset: float = 2.0) -> torch.Tensor:
     U_col = mvn.rsample() 
     return U_col
 
+
 @torch.no_grad()
-def _generate_U(vcovsU: torch.Tensor, *, offset: float = 2.0):
+def _generate_U(vcovsU: torch.Tensor, *, offset: float = 5.0):
     r, t, _ = vcovsU.shape
     U = torch.zeros(t, r)
     for col in range(r):
         U[:, col] = _gen_U_col(vcovsU[col], offset=offset)
     return U
+
+
+def _fin_return(val_start, val_end):
+    return (val_end - val_start) / val_start
 
 
 class GTMatrices(Dataset):
@@ -145,29 +243,43 @@ class GTMatrices(Dataset):
                  #sigma: float = 0.0, 
                  structured: bool = True,   # Use iid or structured U factors
                  realizations: int = 10,    # If structured, nb of realizations for each DGP
-                 seed: Optional[int] = None):
+                 mode: str = 'value',
+                 kernel: str = 'matern',
+                 vtype: str = 'random',
+                 seed: Optional[int] = None,
+                 **kernel_kwargs):
         assert N % realizations == 0
         super().__init__()
         if seed is not None:
             torch.manual_seed(seed)
+        self.mode = mode
+        self.kernel = kernel
+        self.vtype = vtype
         self.N = N
         self.num_dgps = N // realizations
         self.t, self.m, self.r = t, m, r 
         self.structured = structured
         self.realizations = realizations
         #self.sigma = sigma
-        self.U, self.V, self.vcovU = self._generate_factors(N)
+        self.U, self.V, self.vcovU = self._generate_factors(N, **kernel_kwargs)
 
     def __len__(self):
         return self.U.shape[0]
     
-    def _generate_factors(self, N: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _generate_factors(self, N: int, **kernel_kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.structured:
-            vcovsUs = torch.zeros((self.num_dgps, self.r, self.t, self.t))
-            Us = torch.zeros((self.realizations * self.num_dgps, self.t, self.r))
+            t = self.t
+            if self.mode == 'return':
+                t += 1
+            vcovsUs = torch.zeros((self.num_dgps, self.r, t, t))
+            Us = torch.zeros((self.realizations * self.num_dgps, t, self.r))
             Vs = torch.zeros((self.realizations * self.num_dgps, self.m, self.r))
             for dgp in range(self.num_dgps):
-                vcovsU, V = _generate_DGP(t = self.t, m = self.m, r = self.r)
+                vcovsU, V = _generate_DGP(
+                    t = t, m = self.m, r = self.r, 
+                    kernel=self.kernel, vtype=self.vtype,
+                    **kernel_kwargs
+                )
                 vcovsUs[dgp] = vcovsU
                 for i in range(self.realizations):
                     idx = dgp * self.realizations + i
@@ -175,18 +287,24 @@ class GTMatrices(Dataset):
                     Vs[idx] = V
         else:
             Us = torch.rand(N, self.t, self.r, dtype=torch.float32) * 2
-            Vs = torch.rand(N, self.m, self.r, dtype=torch.float32) * 2
+            Vs = torch.rand(N, self.m, self.r, dtype=torch.float32)
             vcovsUs = torch.eye(self.t).reshape(1, 1, self.t, self.t)
         return Us, Vs, vcovsUs
 
     def generate_matrices(self, idx = None):
-        
         idx = np.arange(self.U.shape[0]) if idx is None else idx
         M = torch.einsum('...ij,...kj->...ik', self.U[idx], self.V[idx])
         #M += self.sigma * torch.randn(M.shape, dtype=torch.float32)
         if not self.structured:
             M /= np.sqrt(self.r)
-        return M 
+            return M / M.std(dim=1, keepdim=True)
+        elif self.mode == 'return':
+            M_r = _fin_return(M[:, :-1, :], M[:, 1:, :])
+            return M_r / M_r.std(dim=1, keepdim=True)
+        else:
+            for idx in range(M.shape[0]):
+                M[idx] /= M[idx].std(dim=0)
+            return M
         
     def __getitem__(self, idx):
         if torch.is_tensor(idx):

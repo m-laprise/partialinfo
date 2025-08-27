@@ -39,6 +39,12 @@ if __name__ == '__main__':
     parser.add_argument('--m', type=int, default=25, 
                         help='Number of columns in each ground truth matrix')
     parser.add_argument('--r', type=int, default=25, help='Rank of each ground truth matrix')
+    parser.add_argument('--gt_mode', type=str, default='value', choices=['value', 'return'], 
+                        help='Kind of ground truth matrices (absolute value or relative return)')
+    parser.add_argument('--kernel', type=str, default='matern', choices=['matern', 'cauchy', 'whitenoise'], 
+                        help='Type of vcov for columns of U factors')
+    parser.add_argument('--vtype', type=str, default='random', choices=['random', 'block'], 
+                        help='Random or block diagonal V factors')
     parser.add_argument('--density', type=float, default=0.5, 
                         help='Target proportion of known entries in each ground truth matrix')
     parser.add_argument('--num_agents', type=int, default=20, help='Number of agents')
@@ -49,6 +55,7 @@ if __name__ == '__main__':
                         help='Number of attention heads in the message passing layers') 
     parser.add_argument('--adjacency_mode', type=str, default='learned', choices=['none', 'learned'], 
                         help='Whether adjacency matrix for message-passing is all-to-all or learned')
+    parser.add_argument('--nb_ties', type=int, default=4, help='Number of ties for each agent (k)')
     parser.add_argument('--steps', type=int, default=5, 
                         help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
     # Training hyperparameters
@@ -78,12 +85,15 @@ if __name__ == '__main__':
         torch.backends.cudnn.benchmark = True
     
     with torch.no_grad():  
-        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
-        val_GT = GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
-        test_GT = GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres)
+        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
+                              mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
+        val_GT =   GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
+                              mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
+        test_GT =  GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
+                              mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
         train_data = TemporalData(train_GT)
-        val_data = TemporalData(val_GT, verbose=False)
-        test_data = TemporalData(test_GT, verbose=False)
+        val_data =   TemporalData(val_GT, verbose=False)
+        test_data =  TemporalData(test_GT, verbose=False)
         sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
     
     num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
@@ -111,8 +121,9 @@ if __name__ == '__main__':
 
     model = DistributedDotGAT(
         device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
-        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, dropout=args.dropout, 
-        message_steps=args.steps, adjacency_mode=args.adjacency_mode, sensing_masks=sensingmasks
+        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, 
+        dropout=args.dropout, message_steps=args.steps, adjacency_mode=args.adjacency_mode, 
+        k=args.nb_ties, sensing_masks=sensingmasks
     ).to(device)
     count_parameters(model)
     
@@ -178,12 +189,9 @@ if __name__ == '__main__':
         """netxmask = model.connect.learn_mask.detach().cpu().numpy().astype(int)
         netx = model.connect()[0].detach().cpu().numpy()
         netx[netx == float('-inf')] = 0.0
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        #ax[0].matshow(netxmask, cmap='gray', vmin=0, vmax=1)
-        maxv = abs(netx).max()
-        ax[1].matshow(netx, cmap='PiYG', vmin=-maxv, vmax=maxv)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+        ax.matshow(netxmask, cmap='gray', vmin=0, vmax=netxmask.max())
         fig.show()"""
-        #np.save(f"{file_base}_adj_epoch{epoch}.npy", netx)
         
         improved = (val_acc > best["acc"] + 1e-5) | (val_acc >= best["acc"] - 1e-2 and val_loss < best["loss"] - 1e-5)
         

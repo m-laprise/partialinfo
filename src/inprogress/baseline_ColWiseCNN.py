@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Subset
 
 # --- Assume datagen_temporal is in the parent directory ---
 current = os.path.dirname(os.path.realpath(__file__))
@@ -58,22 +58,6 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-class MatrixDataset(Dataset):
-    """Custom PyTorch Dataset for matrix data."""
-    def __init__(self, data_matrices, masks, labels, device):
-        self.device = device
-        # Apply the mask to the data
-        self.masked_data = (data_matrices * masks).to(torch.float32)
-        self.labels = labels.to(torch.long)
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        # Add a channel dimension for the CNN
-        matrix = self.masked_data[idx].unsqueeze(0)
-        label = self.labels[idx]
-        return matrix.to(self.device), label.to(self.device)
 
 class ColwiseCNN(nn.Module):
     def __init__(self, t, m, k=5, hidden=32):

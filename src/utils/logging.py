@@ -25,6 +25,43 @@ def snapshot(model, aggregator, epoch, args):
     }
     
 
+def init_stats(task_cat):
+    if task_cat == 'classif':
+        return {
+            "train_loss": [],
+            "t_accuracy": [],
+            "t_agreement": [],
+            "val_loss": [],
+            "val_accuracy": [],
+            "val_agreement": []
+        }
+    else:
+        return {
+            "train_loss": [],
+            "t_mse_m": [],
+            "t_entropy_m": [],
+            "t_mse_y": [],
+            "t_entropy_y": [],
+            "val_loss": [],
+            "val_mse_m": [],
+            "val_entropy_m": [],
+            "val_mse_y": [],
+            "val_entropy_y": []
+        }
+
+
+def printlog(task, epoch, stats):
+    if task == 'classif':
+        print(f"Ep {epoch:03d}. ",
+              f"T loss: {stats['train_loss'][-1]:.2e} | T acc: {stats['t_accuracy'][-1]:.2f} | T % maj: {stats['t_agreement'][-1]:.2f} | ",
+              f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}")
+    else:
+        print(f"Ep {epoch:03d}. ",
+              f"T loss: {stats['train_loss'][-1]:.2e} | V loss: {stats['val_loss'][-1]:.2e} |",
+              f"| V mse_m: {stats['val_mse_m'][-1]:.2e} | V mse_y: {stats['val_mse_y'][-1]:.2e}")
+    pass
+
+
 def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_agreement, start_time, end_time, model, aggregator):
     log_file = f"{filename_base}_log.txt"
 

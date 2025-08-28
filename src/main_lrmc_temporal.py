@@ -26,13 +26,11 @@ from torch.utils.data import DataLoader
 
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
 from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
-from utils.logging import atomic_save, log_training_run, snapshot
+from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif
 from utils.training_temporal import (
     evaluate,
-    init_stats,
-    printlog,
     stacked_cross_entropy_loss,
     stacked_MSE,
     train,
@@ -178,6 +176,7 @@ if __name__ == '__main__':
 
     best = {"loss": float('inf'), "acc": float('-inf')}
     patience_counter = 0
+    val_acc = 0.0
 
     # print time at beginning of training
     start = datetime.now()
@@ -226,9 +225,6 @@ if __name__ == '__main__':
             
         if epoch % 10 == 0 or epoch == 1:
             printlog(task_cat, epoch, stats)
-            #print(f"Ep {epoch:03d}. ",
-            #      f"T loss: {train_loss:.2e} | T acc: {t_acc:.2f} | T % maj: {t_agree:.2f} | ",
-            #      f"V loss: {val_loss:.2e} | V acc: {val_acc:.2f} | V % maj: {val_agree:.2f}")
         
         # Save connectivity matrix for visualization
         """netxmask = model.connect.learn_mask.detach().cpu().numpy().astype(int)
@@ -238,10 +234,17 @@ if __name__ == '__main__':
         ax.matshow(netxmask, cmap='gray', vmin=0, vmax=netxmask.max())
         fig.show()"""
         
-        improved = (val_acc > best["acc"] + 1e-5) | (val_acc >= best["acc"] - 1e-2 and val_loss < best["loss"] - 1e-5)
+        if task_cat == 'classif':
+            improved = (val_acc > best["acc"] + 1e-5) | \
+                (val_acc >= best["acc"] - 1e-2 and val_loss < best["loss"] - 1e-5)
+        else:
+            improved = val_loss < best["loss"] - 1e-5
         
         if improved or epoch == 1:
-            best.update(loss=val_loss, acc=val_acc, agree=val_agree, epoch=epoch)
+            if task_cat == 'classif':
+                best.update(loss=val_loss, acc=val_acc, epoch=epoch)
+            else:
+                best.update(loss=val_loss, epoch=epoch)
             atomic_save(snapshot(model, aggregator, epoch, args), checkpoint_path)
             patience_counter = 0
         else:
@@ -250,7 +253,7 @@ if __name__ == '__main__':
         if val_acc == 1.0:
             print(f"Early stopping at epoch {epoch}; validation accuracy is 100%.")
             break
-        if val_loss > 10:
+        if val_loss > (10 * stats['val_loss'][0]):
             print(f"Early stopping at epoch {epoch}; validation loss is diverging.")
             break
     #    if args.patience > 0 and patience_counter >= args.patience:
@@ -293,23 +296,27 @@ if __name__ == '__main__':
         num_workers=num_workers
     )
     if task_cat == 'classif':
-        test_loss, test_acc, test_agree = evaluate(
+        test_loss, test_acc, test_agree = evaluate(                             # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
         )
         print("Test Set Performance | ",
             f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
     else:
-        test_loss, test_mse_m, test_entropy_m, test_mse_y, test_entropy_y = evaluate(
+        test_loss, test_mse_m, test_entropy_m, test_mse_y, test_entropy_y = evaluate(   # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
         )
         print("Test Set Performance | ",
               f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Entropy_m: {test_entropy_m:.2e}, ",
               f"MSE_y: {test_mse_y:.2e}, Entropy_y: {test_entropy_y:.2e}")
 
-    log_training_run(
-        file_base, args, stats, test_loss, test_acc, test_agree, 
-        start, end, model, aggregator
-    )
+    if task_cat == 'classif':
+        log_training_run(
+            file_base, args, stats, test_loss, test_acc, test_agree, 
+            start, end, model, aggregator
+        )
+    else:
+        print("WARNING: Logging function not implemented yet for regression task. ",
+              "No plots or training trace saved to file.")
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
     

@@ -202,10 +202,10 @@ if __name__ == '__main__':
             stats["val_accuracy"].append(val_acc)
             stats["val_agreement"].append(val_agree)
         else:
-            _, t_mse_m, t_entropy_m, t_mse_y, t_entropy_y = evaluate(
+            _, t_mse_m, t_entropy_m, t_mse_y, t_entropy_y = evaluate(            # type: ignore
                 model, aggregator, val_loader, criterion, device, task=task_cat
             )
-            val_loss, val_mse_m, val_entropy_m, val_mse_y, val_entropy_y = evaluate(
+            val_loss, val_mse_m, val_entropy_m, val_mse_y, val_entropy_y = evaluate(  # type: ignore
                 model, aggregator, val_loader, criterion, device, task=task_cat
             )
             stats["t_mse_m"].append(t_mse_m)

@@ -72,10 +72,9 @@ def stacked_MSE(predictions: torch.Tensor,
     
     # Expand and reshape 
     expanded_targets = targets.unsqueeze(1).expand(-1, A, -1).reshape(-1, m_y)  # [B * A, m + y_dim]
-    predictions_flat = predictions.reshape(-1, m_y)                            # [B * A, m + y_dim]
+    predictions_flat = predictions.reshape(-1, m_y)                             # [B * A, m + y_dim]
     # Compute per-prediction MSE loss
-    losses = nn.MSELoss(reduction='none')(predictions_flat, expanded_targets)  # [B * A]
-    losses = losses.view(B, A)                                                  # [B, A]
+    losses = nn.MSELoss(reduction='none')(predictions_flat, expanded_targets)   # [B * A, m + y_dim]
 
     # Apply reduction
     if reduction == 'mean':
@@ -83,7 +82,7 @@ def stacked_MSE(predictions: torch.Tensor,
     elif reduction == 'sum':
         return losses.sum()
     elif reduction == 'none':
-        return losses
+        return losses.mean(dim=1).view(B, A)                                    # [B, A]
     else:
         raise ValueError(f"Invalid reduction type: {reduction}")
 

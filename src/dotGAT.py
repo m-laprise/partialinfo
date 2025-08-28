@@ -381,14 +381,15 @@ class CollectiveInferPredict(nn.Module):
         self.n_agents = num_agents
         self.agent_d_out = agent_outputs_dim
         self.m = m
+        self.y_dim = y_dim
         self.W_decode = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
         self.b_decode = nn.Parameter(torch.zeros(self.n_agents, self.m))
         
-        self.W_fwd = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
+        self.W_fwd = nn.Parameter(torch.empty(self.n_agents, self.m, self.m))
         self.b_fwd = nn.Parameter(torch.zeros(self.n_agents, self.m))
         
-        self.W_predict = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
-        self.b_predict = nn.Parameter(torch.zeros(self.n_agents, self.m))
+        self.W_predict = nn.Parameter(torch.empty(self.n_agents, self.m, self.y_dim))
+        self.b_predict = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
         
         self.prenorm = nn.RMSNorm(self.agent_d_out)
         self.swish = nn.SiLU()

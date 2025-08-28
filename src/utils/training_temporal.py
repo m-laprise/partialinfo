@@ -164,7 +164,7 @@ def classif_vote_acc_agree(logits, target):
 def regression_acc_agree(logits, target):    
     """
     For each example, take average prediction and compute per-entry MSE of the average with the targer.
-    For each example, compute entropy of distribution of agent-level values.
+    For each example, compute inter-agent variance of predictions.
     Return batch sum for each quantity.
     Args: 
         logits: [B, A, m or y_dim]
@@ -185,15 +185,18 @@ def regression_acc_agree(logits, target):
     mse_per_example = ((avg_preds - target) ** 2).mean(dim=1)  # mean over D
     batch_mse_sum = mse_per_example.sum().item()
 
-    # Inter-agent diversity: Gaussian differential entropy from across-agent variance
-    # var shape: [B, D]
-    var = logits.var(dim=1, unbiased=False)
-    eps = 1e-12
-    entropy_per_entry = 0.5 * torch.log(torch.clamp(var, min=eps) * (2.0 * math.pi * math.e))
-    entropy_per_example = entropy_per_entry.mean(dim=1)        # mean over D
-    batch_entropy_sum = entropy_per_example.sum().item()
+    # Inter-agent diversity
+    if A == 1:
+        batch_variance_sum = 0
+    elif D > 1: # [B, A, m] case
+        var = logits.var(dim=1, unbiased=False) # [B, m] Inter-agent variance for each m; 
+        variance_per_example = var.mean(dim=1)  # [B]    Mean over m
+        batch_variance_sum = variance_per_example.sum().item()
+    elif D == 1: # [B, A, 1] case
+        variance_per_example = logits.squeeze(-1).var(dim=1, unbiased=False)  # [B]
+        batch_variance_sum = variance_per_example.sum().item()
 
-    return batch_mse_sum, batch_entropy_sum
+    return batch_mse_sum, batch_variance_sum
 
 
 @torch.inference_mode()
@@ -215,9 +218,9 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         total_agree = 0.0
     elif task == 'regression':
         total_mse_m = 0.0
-        total_entropy_m = 0.0
+        total_diversity_m = 0.0
         total_mse_y = 0.0
-        total_entropy_y = 0.0
+        total_diversity_y = 0.0
     else:
         raise NotImplementedError(f"Task {task} not implemented")
 
@@ -245,12 +248,12 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         else:
             B, m_ydim = target.shape
             m = m_ydim - 1
-            batch_mse_m, batch_entropy_m = regression_acc_agree(logits[:, :, :m], target[:, :m])
-            batch_mse_y, batch_entropy_y = regression_acc_agree(logits[:, :, -1], target[:, -1])
+            batch_mse_m, batch_diversity_m = regression_acc_agree(logits[:, :, :m], target[:, :m])
+            batch_mse_y, batch_diversity_y = regression_acc_agree(logits[:, :, -1], target[:, -1])
             total_mse_m += batch_mse_m
-            total_entropy_m += batch_entropy_m
+            total_diversity_m += batch_diversity_m
             total_mse_y += batch_mse_y
-            total_entropy_y += batch_entropy_y
+            total_diversity_y += batch_diversity_y
 
     mean_loss = total_loss / max(total_examples, 1)
     if task == 'classif':
@@ -264,15 +267,15 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         )
     else:
         mean_mse_m = total_mse_m / max(total_examples, 1)
-        mean_entropy_m = total_entropy_m / max(total_examples, 1)
+        mean_diversity_m = total_diversity_m / max(total_examples, 1)
         mean_mse_y = total_mse_y / max(total_examples, 1)
-        mean_entropy_y = total_entropy_y / max(total_examples, 1)
+        mean_diversity_y = total_diversity_y / max(total_examples, 1)
     
         return (
             float(mean_loss), 
             float(mean_mse_m), 
-            float(mean_entropy_m),
+            float(mean_diversity_m),
             float(mean_mse_y),
-            float(mean_entropy_y)
+            float(mean_diversity_y)
         )
 

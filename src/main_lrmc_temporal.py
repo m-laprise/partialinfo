@@ -201,21 +201,21 @@ if __name__ == '__main__':
             stats["val_accuracy"].append(val_acc)
             stats["val_agreement"].append(val_agree)
         else:
-            _, t_mse_m, t_entropy_m, t_mse_y, t_entropy_y = evaluate(            # type: ignore
+            _, t_mse_m, t_diversity_m, t_mse_y, t_diversity_y = evaluate(            # type: ignore
                 model, aggregator, val_loader, criterion, device, task=task_cat
             )
-            val_loss, val_mse_m, val_entropy_m, val_mse_y, val_entropy_y = evaluate(  # type: ignore
+            val_loss, val_mse_m, val_diversity_m, val_mse_y, val_diversity_y = evaluate(  # type: ignore
                 model, aggregator, val_loader, criterion, device, task=task_cat
             )
             stats["t_mse_m"].append(t_mse_m)
-            stats["t_entropy_m"].append(t_entropy_m)
+            stats["t_diversity_m"].append(t_diversity_m)
             stats["t_mse_y"].append(t_mse_y)
-            stats["t_entropy_y"].append(t_entropy_y)
+            stats["t_diversity_y"].append(t_diversity_y)
             stats["val_loss"].append(val_loss)
             stats["val_mse_m"].append(val_mse_m)
-            stats["val_entropy_m"].append(val_entropy_m)
+            stats["val_diversity_m"].append(val_diversity_m)
             stats["val_mse_y"].append(val_mse_y)
-            stats["val_entropy_y"].append(val_entropy_y)
+            stats["val_diversity_y"].append(val_diversity_y)
         
         if epoch == 1:
             if device.type == 'cuda':
@@ -302,12 +302,12 @@ if __name__ == '__main__':
         print("Test Set Performance | ",
             f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
     else:
-        test_loss, test_mse_m, test_entropy_m, test_mse_y, test_entropy_y = evaluate(   # type: ignore
+        test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = evaluate(   # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
         )
         print("Test Set Performance | ",
-              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Entropy_m: {test_entropy_m:.2e}, ",
-              f"MSE_y: {test_mse_y:.2e}, Entropy_y: {test_entropy_y:.2e}")
+              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Diversity_m: {test_diversity_m:.2e}, ",
+              f"MSE_y: {test_mse_y:.2e}, Diversity_y: {test_diversity_y:.2e}")
 
     if task_cat == 'classif':
         log_training_run(

@@ -39,14 +39,14 @@ def init_stats(task_cat):
         return {
             "train_loss": [],
             "t_mse_m": [],
-            "t_entropy_m": [],
+            "t_diversity_m": [],
             "t_mse_y": [],
-            "t_entropy_y": [],
+            "t_diversity_y": [],
             "val_loss": [],
             "val_mse_m": [],
-            "val_entropy_m": [],
+            "val_diversity_m": [],
             "val_mse_y": [],
-            "val_entropy_y": []
+            "val_diversity_y": []
         }
 
 
@@ -57,8 +57,8 @@ def printlog(task, epoch, stats):
               f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}")
     else:
         print(f"Ep {epoch:03d}. ",
-              f"T loss: {stats['train_loss'][-1]:.2e} | V loss: {stats['val_loss'][-1]:.2e} |",
-              f"| V mse_m: {stats['val_mse_m'][-1]:.2e} | V mse_y: {stats['val_mse_y'][-1]:.2e}")
+              f"T l: {stats['train_loss'][-1]:.2e} | T var y: {stats['t_diversity_y'][-1]:.2e} || V l: {stats['val_loss'][-1]:.2e} |",
+              f"V mse_m: {stats['val_mse_m'][-1]:.2e} | V mse_y: {stats['val_mse_y'][-1]:.2e} || V var m: {stats['val_diversity_m'][-1]:.2e} | V var y: {stats['val_diversity_y'][-1]:.2e}")
     pass
 
 

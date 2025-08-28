@@ -163,10 +163,10 @@ def log_training_run(
             f.write("Epoch Performance\n")
             f.write("-----------------\n")
             f.write("Epoch | Train Loss | T var y | V loss | V mse_m | V mse_y | V var m | V var y\n")
-            f.write("------|------------|----------|--------|---------|---------|---------|---------\n")
-            for i, (tl, tvm, vl, vmm, vmy, vmy) in enumerate(zip(stats["train_loss"], stats["t_diversity_y"],
+            f.write("------|------------|---------|--------|---------|---------|---------|---------\n")
+            for i, (tl, tvy, vl, vmm, vmy, vvm, vvy) in enumerate(zip(stats["train_loss"], stats["t_diversity_y"],
                                                     stats["val_loss"], stats["val_mse_m"], stats["val_mse_y"],
                                                     stats["val_diversity_m"], stats["val_diversity_y"]), 1):
-                f.write(f"{i:5d} | {tl:.2e}   | {tvm:.2f}    | {vl:.2e} | {vmm:.2e} | {vmy:.2e} | {vmm:.2f} | {vmy:.2f}\n")
+                f.write(f"{i:5d} | {tl:.2e}   | {tvy:.2f}    | {vl:.2e} | {vmm:.2e} | {vmy:.2e} | {vvm:.2f} | {vvy:.2f}\n")
 
     print(f"Training log saved to: {log_file}")

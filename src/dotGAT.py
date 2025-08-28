@@ -409,16 +409,17 @@ class CollectiveInferPredict(nn.Module):
         agent_outputs: [B, A, H] 
         returns intermediate next row prediction and outcome prediction: [B, A, m + y_dim]
         """
-        _, A, H = agent_outputs.shape
+        B, A, H = agent_outputs.shape
+        
         if A != self.n_agents or H != self.agent_d_out:
             raise ValueError(f"Expected a_outputs shape [B,{self.n_agents},{self.agent_d_out}], got {agent_outputs.shape}")
 
         agent_outputs = self.prenorm(agent_outputs) # [B, A, H] 
-        agent_m = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode) + self.b_decode.unsqueeze(0) # [B, A, m] 
+        agent_m = torch.einsum('bah,ahm->bam', agent_outputs, self.W_decode) + self.b_decode # [B, A, m] 
         agent_m = self.swish(agent_m)
-        agent_m = torch.einsum('bij,ijk->bik', agent_m, self.W_fwd) + self.b_fwd.unsqueeze(0) # [B, A, m] 
+        agent_m = torch.einsum('bam,amn->ban', agent_m, self.W_fwd) + self.b_fwd         # [B, A, m] 
         
-        agent_y = torch.einsum('bij,ijk->bik', agent_m, self.W_predict) + self.b_predict.unsqueeze(0) # [B, A, y_dim]
+        agent_y = torch.einsum('ban,any->bay', agent_m, self.W_predict) + self.b_predict # [B, A, y_dim]
         agent_y = self.tanh(agent_y)
         
         return torch.cat((agent_m, agent_y), dim=-1) # [B, A, m + y_dim]

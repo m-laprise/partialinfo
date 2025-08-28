@@ -190,8 +190,12 @@ if __name__ == '__main__':
         scheduler.step()
         stats["train_loss"].append(train_loss)
         if task_cat == 'classif':
-            _, t_acc, t_agree = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat)
-            val_loss, val_acc, val_agree = evaluate(model, aggregator, val_loader, criterion, device, task=task_cat)
+            _, t_acc, t_agree = evaluate(                                       # type: ignore
+                model, aggregator, train_loader, criterion, device, task=task_cat
+            ) 
+            val_loss, val_acc, val_agree = evaluate(                            # type: ignore
+                model, aggregator, val_loader, criterion, device, task=task_cat
+            ) 
             stats["t_accuracy"].append(t_acc)
             stats["t_agreement"].append(t_agree)
             stats["val_loss"].append(val_loss)

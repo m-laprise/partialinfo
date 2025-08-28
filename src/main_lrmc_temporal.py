@@ -28,7 +28,7 @@ from datagen_temporal import GTMatrices, SensingMasks, TemporalData
 from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
-from utils.plotting import plot_classif
+from utils.plotting import plot_classif, plot_regression
 from utils.training_temporal import (
     evaluate,
     stacked_cross_entropy_loss,
@@ -286,7 +286,8 @@ if __name__ == '__main__':
         random_accuracy = 1.0 / args.m
         plot_classif(stats, file_base, random_accuracy)
     else:
-        pass
+        plot_regression(stats, file_base)
+
     
     # Final test evaluation on fresh data
     test_loader = DataLoader(
@@ -299,24 +300,23 @@ if __name__ == '__main__':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
         )
+        test_stats = (test_loss, test_acc, test_agree)
         print("Test Set Performance | ",
             f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
     else:
         test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = evaluate(   # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
         )
+        test_stats = (test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y)
         print("Test Set Performance | ",
-              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Diversity_m: {test_diversity_m:.2e}, ",
-              f"MSE_y: {test_mse_y:.2e}, Diversity_y: {test_diversity_y:.2e}")
+              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Diversity_m: {test_diversity_m:.2f}, ",
+              f"MSE_y: {test_mse_y:.2e}, Diversity_y: {test_diversity_y:.2f}")
 
-    if task_cat == 'classif':
-        log_training_run(
-            file_base, args, stats, test_loss, test_acc, test_agree, 
-            start, end, model, aggregator
-        )
-    else:
-        print("WARNING: Logging function not implemented yet for regression task. ",
-              "No plots or training trace saved to file.")
+    log_training_run(
+        file_base, args, stats, test_stats, 
+        start, end, model, aggregator, task_cat
+    )
+
     #file_prefix = Path(file_base).name  # Extracts just 'run_YYYYMMDD_HHMMSS'
     #plot_connectivity_matrices("results", prefix=file_prefix, cmap="coolwarm")
     

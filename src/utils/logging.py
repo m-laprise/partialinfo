@@ -57,14 +57,22 @@ def printlog(task, epoch, stats):
               f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}")
     else:
         print(f"Ep {epoch:03d}. ",
-              f"T l: {stats['train_loss'][-1]:.2e} | T var y: {stats['t_diversity_y'][-1]:.2e} || V l: {stats['val_loss'][-1]:.2e} |",
-              f"V mse_m: {stats['val_mse_m'][-1]:.2e} | V mse_y: {stats['val_mse_y'][-1]:.2e} || V var m: {stats['val_diversity_m'][-1]:.2e} | V var y: {stats['val_diversity_y'][-1]:.2e}")
+              f"Loss: {stats['train_loss'][-1]:.2e} | T var y: {stats['t_diversity_y'][-1]:.2f} || V loss: {stats['val_loss'][-1]:.2e} |",
+              f"V mse_m: {stats['val_mse_m'][-1]:.2e} | V mse_y: {stats['val_mse_y'][-1]:.2e} || V var m: {stats['val_diversity_m'][-1]:.2f} | V var y: {stats['val_diversity_y'][-1]:.2f}")
     pass
 
 
-def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_agreement, start_time, end_time, model, aggregator):
+def log_training_run(
+    filename_base, args, stats, test_stats, start_time, end_time, model, aggregator, task_cat
+):
     log_file = f"{filename_base}_log.txt"
-
+    if task_cat == 'classif':
+        test_loss, test_accuracy, test_agreement = test_stats
+    elif task_cat == 'regression':
+        test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = test_stats
+    else:
+        raise NotImplementedError(f"Task {task_cat} not implemented.")
+ 
     # Git commit hash
     try:
         commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
@@ -73,10 +81,11 @@ def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_
 
     # Hyperparameter groups
     grouped_hparams = {
-        "Ground Truth and Sensing Hyperparameters": ['t', 'm', 'r', 'density', 'num_agents'],
-        "Model Hyperparameters": ['hidden_dim'],
-        "Message Passing Hyperparameters": ['att_heads', 'adjacency_mode', 'steps'],
-        "Training Hyperparameters": ['dropout', 'lr', 'epochs', 'batch_size', 'patience', 'train_n', 'val_n', 'test_n']
+        "Ground Truth Hyperparameters": ['t', 'm', 'r', 'density', 'nres'],
+        "Model Hyperparameters": ['num_agents', 'hidden_dim', 'sharedv'],
+        "Message Passing Hyperparameters": ['att_heads', 'nb_ties', 'steps'],
+        "Training Hyperparameters": ['dropout', 'lr', 'epochs', 'batch_size', 'patience', 'train_n', 'val_n', 'test_n'],
+        "Task Hyperparameters": ['task', 'gt_mode', 'kernel', 'vtype']
     }
 
     # Hardware Info
@@ -133,15 +142,31 @@ def log_training_run(filename_base, args, stats, test_loss, test_accuracy, test_
         training_time = (end_time - start_time).total_seconds() / 60
         f.write(f"Total Training Time: {training_time:.2f} minutes\n")
         f.write(f"Final Test Loss: {test_loss:.2e}\n")
-        f.write(f"Final Test Accuracy: {test_accuracy:.2f}\n")
-        f.write(f"Final Test % in Majority: {test_agreement:.2f}\n\n")
+        if task_cat == 'classif':
+            f.write(f"Final Test Accuracy: {test_accuracy:.2f}\n")
+            f.write(f"Final Test % in Majority: {test_agreement:.2f}\n\n")
 
-        f.write("Epoch Performance\n")
-        f.write("-----------------\n")
-        f.write("Epoch | Train Loss | Train Acc | T % maj | Val Loss | Val Acc | V % maj\n")
-        f.write("------|------------|-----------|---------|----------|---------|---------\n")
-        for i, (tl, ta, tm, vl, va, vm) in enumerate(zip(stats["train_loss"], stats["t_accuracy"], stats["t_agreement"],
-                                                 stats["val_loss"], stats["val_accuracy"], stats["val_agreement"]), 1):
-            f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f}    | {vl:.2e} | {va:.2f}    | {vm:.2f}\n")
+            f.write("Epoch Performance\n")
+            f.write("-----------------\n")
+            f.write("Epoch | Train Loss | Train Acc | T % maj | Val Loss | Val Acc | V % maj\n")
+            f.write("------|------------|-----------|---------|----------|---------|---------\n")
+            for i, (tl, ta, tm, vl, va, vm) in enumerate(zip(stats["train_loss"], stats["t_accuracy"], stats["t_agreement"],
+                                                    stats["val_loss"], stats["val_accuracy"], stats["val_agreement"]), 1):
+                f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f}    | {vl:.2e} | {va:.2f}    | {vm:.2f}\n")
+        
+        else:
+            f.write(f"Final Test MSE_m: {test_mse_m:.2e}\n")
+            f.write(f"Final Test MSE_y: {test_mse_y:.2e}\n")
+            f.write(f"Final Test Diversity_m: {test_diversity_m:.2f}\n")
+            f.write(f"Final Test Diversity_y: {test_diversity_y:.2f}\n\n")
+
+            f.write("Epoch Performance\n")
+            f.write("-----------------\n")
+            f.write("Epoch | Train Loss | T var y | V loss | V mse_m | V mse_y | V var m | V var y\n")
+            f.write("------|------------|----------|--------|---------|---------|---------|---------\n")
+            for i, (tl, tvm, vl, vmm, vmy, vmy) in enumerate(zip(stats["train_loss"], stats["t_diversity_y"],
+                                                    stats["val_loss"], stats["val_mse_m"], stats["val_mse_y"],
+                                                    stats["val_diversity_m"], stats["val_diversity_y"]), 1):
+                f.write(f"{i:5d} | {tl:.2e}   | {tvm:.2f}    | {vl:.2e} | {vmm:.2e} | {vmy:.2e} | {vmm:.2f} | {vmy:.2f}\n")
 
     print(f"Training log saved to: {log_file}")

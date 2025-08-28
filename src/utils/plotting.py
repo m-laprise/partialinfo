@@ -95,6 +95,33 @@ def plot_classif(stats, filename_base, random_accuracy):
     fig.tight_layout()
     fig.savefig(f"{filename_base}_classif_metrics.png")
     plt.close(fig)
+    
+
+def plot_regression(stats, filename_base):
+    epochs = np.arange(1, len(stats["train_loss"]) + 1)
+    # Plot loss-related metrics in two panels
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
+    axs[0].plot(epochs, np.log(stats["train_loss"]), label="Train Loss", color='tab:blue')
+    axs[0].plot(epochs, np.log(stats["val_loss"]), label="Val Loss", color='tab:orange')
+    axs[0].set_title("Loss")
+    axs[0].set_xlabel("Epoch")
+    axs[0].set_ylabel("Log MSE Loss")
+    axs[0].grid(True)
+    axs[0].legend()
+    axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    axs[1].plot(epochs, stats["val_mse_y"], label="MSE on m")
+    axs[1].plot(epochs, stats["val_mse_m"], label="MSE on y")
+    axs[1].set_title("Validation MSE")
+    axs[1].set_xlabel("Epoch")
+    axs[1].set_ylabel("MSE")
+    axs[1].grid(True)
+    axs[1].legend()
+    axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    fig.tight_layout()
+    fig.savefig(f"{filename_base}_regression_metrics.png")
+    plt.close(fig)
 
 """    
 def plot_connectivity_matrices(directory, prefix, max_cols=5, cmap='coolwarm'):

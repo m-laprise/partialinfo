@@ -369,3 +369,56 @@ class CollectiveClassifier(nn.Module):
         agent_logits = agent_logits + self.b_decode.unsqueeze(0)
         
         return agent_logits
+
+
+class CollectiveInferPredict(nn.Module):
+    """
+    Regression module decoding internal states to next row values and outcome prediction
+    for each agent.
+    """
+    def __init__(self, num_agents: int, agent_outputs_dim: int, m: int, y_dim: int = 1):
+        super().__init__()
+        self.n_agents = num_agents
+        self.agent_d_out = agent_outputs_dim
+        self.m = m
+        self.W_decode = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
+        self.b_decode = nn.Parameter(torch.zeros(self.n_agents, self.m))
+        
+        self.W_fwd = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
+        self.b_fwd = nn.Parameter(torch.zeros(self.n_agents, self.m))
+        
+        self.W_predict = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
+        self.b_predict = nn.Parameter(torch.zeros(self.n_agents, self.m))
+        
+        self.prenorm = nn.RMSNorm(self.agent_d_out)
+        self.swish = nn.SiLU()
+        self.tanh = nn.Tanh()
+        
+        self.reset_parameters()  # initialize weights
+    
+    def reset_parameters(self):
+        with torch.no_grad():
+            for i in range(self.W_decode.size(0)):
+                nn.init.xavier_uniform_(self.W_decode[i])
+                nn.init.xavier_uniform_(self.W_fwd[i])
+                nn.init.xavier_uniform_(self.W_predict[i])
+
+    def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
+        """
+        agent_outputs: [B, A, H] 
+        returns intermediate next row prediction and outcome prediction: [B, A, m + y_dim]
+        """
+        _, A, H = agent_outputs.shape
+        if A != self.n_agents or H != self.agent_d_out:
+            raise ValueError(f"Expected a_outputs shape [B,{self.n_agents},{self.agent_d_out}], got {agent_outputs.shape}")
+
+        agent_outputs = self.prenorm(agent_outputs) # [B, A, H] 
+        agent_m = torch.einsum('bij,ijk->bik', agent_outputs, self.W_decode) + self.b_decode.unsqueeze(0) # [B, A, m] 
+        agent_m = self.swish(agent_m)
+        agent_m = torch.einsum('bij,ijk->bik', agent_m, self.W_fwd) + self.b_fwd.unsqueeze(0) # [B, A, m] 
+        
+        agent_y = torch.einsum('bij,ijk->bik', agent_m, self.W_predict) + self.b_predict.unsqueeze(0) # [B, A, y_dim]
+        agent_y = self.tanh(agent_y)
+        
+        return torch.cat((agent_m, agent_y), dim=-1) # [B, A, m + y_dim]
+    

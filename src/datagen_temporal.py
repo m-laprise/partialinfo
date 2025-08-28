@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 from torch.utils.data import Dataset
 
@@ -59,7 +60,7 @@ def _random_cauchy_params(mode: int) -> Dict[str, float]:
     if mode not in {0, 1, 2}:
         raise ValueError("mode must be 0 (long-range), 1 (medium-range) or 2 (fast decay)")
     beta_ranges = {
-        0: (1e-5, 0.5),
+        0: (1e-3, 0.5),
         1: (0.5, 0.9),
         2: (1.0, 1.5),
     }
@@ -236,6 +237,9 @@ def _fin_return(val_start, val_end):
 
 
 class GTMatrices(Dataset):
+    """
+    Generates ground truth matrices. Task-agnostic and does not contain any labels.
+    """
     @torch.no_grad()
     def __init__(self, 
                  N: int,                    # Number of examples M = U @ V.T
@@ -313,28 +317,71 @@ class GTMatrices(Dataset):
         return self.generate_matrices(idx)
 
 
-class TemporalData(Dataset):
-    def __init__(self, matrices: GTMatrices, verbose=True):
+class RandomLinearHead(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(self.in_dim, 2*self.in_dim, bias=True),
+            nn.SiLU(),
+            nn.Linear(2*self.in_dim, self.out_dim, bias=False)
+        ) 
+        self.tanh = nn.Tanh()
+
+    def forward(self, x):
+        return self.tanh(self.mlp(x))
+    
+
+class TemporalData(Dataset):
+    """
+    Takes ground truth matrices and a task statement, and generates labeled data that can
+    be provided to a DataLoader.
+    """
+    def __init__(self, matrices: GTMatrices, task: str = 'argmax', verbose=True):
+        super().__init__()
+        if task not in ['argmax', 'nonlinear']:
+            raise NotImplementedError(f"Task {task} not implemented")
+        
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
+        self.task = task
+        if self.task == 'nonlinear':
+            self.random_mlp = RandomLinearHead(self.m, 1)
+        
         self.verbose = verbose
         self.stats = self.__summary()
 
     def __len__(self):
         return self.data.shape[0]
     
-    def _generate_label(self, matrix):
-        # Label is the index of the maximum entry in the last row
-        label = torch.argmax(matrix[-1, :])
+    def _mlp_apply(self, x: torch.Tensor) -> torch.Tensor:
+        return self.random_mlp(x)
+    
+    def _generate_ycol(self, matrix):
+        if matrix.ndimension() == 2:
+            matrix = matrix.unsqueeze(0)
+        vectorized_mlp = torch.func.vmap(self._mlp_apply)
+        y_column = vectorized_mlp(matrix).squeeze(0)
+        return y_column
+    
+    def _generate_label(self, matrix, y_column):
+        if self.task == 'argmax':
+            # Label is the index of the maximum entry in the last row
+            label = torch.argmax(matrix[-1, :])
+        elif self.task == 'nonlinear':
+            # Label is the last row and the last element of y
+            last_row = matrix[-1, :]
+            label = torch.cat((last_row, y_column[-1]))
         return label
 
     def __getitem__(self, idx: int):
         _, t, m = self.data.shape
         matrix = self.data[idx, :, :]
+        y_column = self._generate_ycol(matrix) if self.task == 'nonlinear' else None
         sample = {
             'matrix': matrix.view(1, t*m),
-            'label': self._generate_label(matrix)
+            'label': self._generate_label(matrix, y_column)
         }
         
         return sample

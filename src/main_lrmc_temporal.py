@@ -1,6 +1,16 @@
 """
 Dot product graph attention network for distributed inductive matrix completion or prediction tasks, 
 with learned agent-based message passing setup.
+
+Example usage:
+```
+uv run ./src/main_lrmc_temporal.py \
+  --t 50 --m 25 --r 6 --density 0.5 \
+  --num_agents 64 --nb_ties 4 --hidden_dim 64 \
+  --lr 1e-4 --epochs 150 --steps 5 \
+  --batch_size 100 --train_n 1000 --no-sharedv \
+  --gt_mode 'value' --kernel 'cauchy' --vtype 'random' --task 'argmax'
+```
 """
 
 import argparse
@@ -15,14 +25,16 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
-from dotGAT import CollectiveClassifier, DistributedDotGAT
+from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 from utils.logging import atomic_save, log_training_run, snapshot
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif
 from utils.training_temporal import (
     evaluate,
     init_stats,
+    printlog,
     stacked_cross_entropy_loss,
+    stacked_MSE,
     train,
 )
 
@@ -41,10 +53,12 @@ if __name__ == '__main__':
     parser.add_argument('--r', type=int, default=25, help='Rank of each ground truth matrix')
     parser.add_argument('--gt_mode', type=str, default='value', choices=['value', 'return'], 
                         help='Kind of ground truth matrices (absolute value or relative return)')
-    parser.add_argument('--kernel', type=str, default='matern', choices=['matern', 'cauchy', 'whitenoise'], 
+    parser.add_argument('--kernel', type=str, default='cauchy', choices=['matern', 'cauchy', 'whitenoise'], 
                         help='Type of vcov for columns of U factors')
     parser.add_argument('--vtype', type=str, default='random', choices=['random', 'block'], 
                         help='Random or block diagonal V factors')
+    parser.add_argument('--task', type=str, default='nonlinear', choices=['argmax', 'nonlinear'], 
+                        help='Prediction task: argmax or arbitrary nonlinear function of row t+1')
     parser.add_argument('--density', type=float, default=0.5, 
                         help='Target proportion of known entries in each ground truth matrix')
     parser.add_argument('--num_agents', type=int, default=20, help='Number of agents')
@@ -75,6 +89,13 @@ if __name__ == '__main__':
     parser.set_defaults(sharedv=True)
     
     args = parser.parse_args()
+    
+    if args.task == 'argmax':
+        task_cat = 'classif'
+    elif args.task == 'nonlinear':
+        task_cat = 'regression'
+    else:
+        raise NotImplementedError(f"Task {args.task} not implemented")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -91,9 +112,9 @@ if __name__ == '__main__':
                               mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
         test_GT =  GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
                               mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
-        train_data = TemporalData(train_GT)
-        val_data =   TemporalData(val_GT, verbose=False)
-        test_data =  TemporalData(test_GT, verbose=False)
+        train_data = TemporalData(train_GT, task=args.task)
+        val_data =   TemporalData(val_GT, task=args.task, verbose=False)
+        test_data =  TemporalData(test_GT, task=args.task, verbose=False)
         sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
     
     num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
@@ -127,9 +148,14 @@ if __name__ == '__main__':
     ).to(device)
     count_parameters(model)
     
-    aggregator = CollectiveClassifier(
-        num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
-    ).to(device)
+    if task_cat == 'classif':
+        aggregator = CollectiveClassifier(
+            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
+        ).to(device)
+    elif task_cat == 'regression':
+        aggregator = CollectiveInferPredict(
+            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
+        )
     count_parameters(aggregator)
     print("--------------------------")
     
@@ -144,13 +170,12 @@ if __name__ == '__main__':
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
     scaler = GradScaler(enabled=(device.type == 'cuda'))
-    criterion = stacked_cross_entropy_loss
+    criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
     
-    stats = init_stats()
+    stats = init_stats(task_cat)
     file_base = unique_filename()
     checkpoint_path = f"{file_base}_checkpoint.pt"
-    
-    #best_loss = float('inf')
+
     best = {"loss": float('inf'), "acc": float('-inf')}
     patience_counter = 0
 
@@ -163,16 +188,31 @@ if __name__ == '__main__':
     for epoch in range(1, args.epochs + 1):
         train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
         scheduler.step()
-        
-        _, t_acc, t_agree = evaluate(model, aggregator, train_loader, criterion, device)
-        val_loss, val_acc, val_agree = evaluate(model, aggregator, val_loader, criterion, device)
-        
         stats["train_loss"].append(train_loss)
-        stats["t_accuracy"].append(t_acc)
-        stats["t_agreement"].append(t_agree)
-        stats["val_loss"].append(val_loss)
-        stats["val_accuracy"].append(val_acc)
-        stats["val_agreement"].append(val_agree)
+        if task_cat == 'classif':
+            _, t_acc, t_agree = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat)
+            val_loss, val_acc, val_agree = evaluate(model, aggregator, val_loader, criterion, device, task=task_cat)
+            stats["t_accuracy"].append(t_acc)
+            stats["t_agreement"].append(t_agree)
+            stats["val_loss"].append(val_loss)
+            stats["val_accuracy"].append(val_acc)
+            stats["val_agreement"].append(val_agree)
+        else:
+            _, t_mse_m, t_entropy_m, t_mse_y, t_entropy_y = evaluate(
+                model, aggregator, val_loader, criterion, device, task=task_cat
+            )
+            val_loss, val_mse_m, val_entropy_m, val_mse_y, val_entropy_y = evaluate(
+                model, aggregator, val_loader, criterion, device, task=task_cat
+            )
+            stats["t_mse_m"].append(t_mse_m)
+            stats["t_entropy_m"].append(t_entropy_m)
+            stats["t_mse_y"].append(t_mse_y)
+            stats["t_entropy_y"].append(t_entropy_y)
+            stats["val_loss"].append(val_loss)
+            stats["val_mse_m"].append(val_mse_m)
+            stats["val_entropy_m"].append(val_entropy_m)
+            stats["val_mse_y"].append(val_mse_y)
+            stats["val_entropy_y"].append(val_entropy_y)
         
         if epoch == 1:
             if device.type == 'cuda':
@@ -181,9 +221,10 @@ if __name__ == '__main__':
             print(f"Time elapsed for first epoch: {(t1 - start).total_seconds():.4f} seconds.")
             
         if epoch % 10 == 0 or epoch == 1:
-            print(f"Ep {epoch:03d}. ",
-                  f"T loss: {train_loss:.2e} | T acc: {t_acc:.2f} | T % maj: {t_agree:.2f} | ",
-                  f"V loss: {val_loss:.2e} | V acc: {val_acc:.2f} | V % maj: {val_agree:.2f}")
+            printlog(task_cat, epoch, stats)
+            #print(f"Ep {epoch:03d}. ",
+            #      f"T loss: {train_loss:.2e} | T acc: {t_acc:.2f} | T % maj: {t_agree:.2f} | ",
+            #      f"V loss: {val_loss:.2e} | V acc: {val_acc:.2f} | V % maj: {val_agree:.2f}")
         
         # Save connectivity matrix for visualization
         """netxmask = model.connect.learn_mask.detach().cpu().numpy().astype(int)
@@ -234,8 +275,11 @@ if __name__ == '__main__':
     else:
         print("No checkpoint found; using current in-memory weights.")
 
-    random_accuracy = 1.0 / args.m
-    plot_classif(stats, file_base, random_accuracy)
+    if task_cat == 'classif':
+        random_accuracy = 1.0 / args.m
+        plot_classif(stats, file_base, random_accuracy)
+    else:
+        pass
     
     # Final test evaluation on fresh data
     test_loader = DataLoader(
@@ -244,9 +288,19 @@ if __name__ == '__main__':
         pin_memory=pin, 
         num_workers=num_workers
     )
-    test_loss, test_acc, test_agree = evaluate(model, aggregator, test_loader, criterion, device)
-    print("Test Set Performance | ",
-          f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
+    if task_cat == 'classif':
+        test_loss, test_acc, test_agree = evaluate(
+            model, aggregator, test_loader, criterion, device, task=task_cat
+        )
+        print("Test Set Performance | ",
+            f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
+    else:
+        test_loss, test_mse_m, test_entropy_m, test_mse_y, test_entropy_y = evaluate(
+            model, aggregator, test_loader, criterion, device, task=task_cat
+        )
+        print("Test Set Performance | ",
+              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Entropy_m: {test_entropy_m:.2e}, ",
+              f"MSE_y: {test_mse_y:.2e}, Entropy_y: {test_entropy_y:.2e}")
 
     log_training_run(
         file_base, args, stats, test_loss, test_acc, test_agree, 

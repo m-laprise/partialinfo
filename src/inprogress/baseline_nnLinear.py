@@ -4,8 +4,6 @@ Train a simple linear model (centralized case) to predict the index of the colum
 with the maximal value in row t+1 (the last row) of M = U V^T, using ONLY the
 masked information up to time t (global sensing mask).
 
-Requires: datagen_temporal.py available on the Python path (same folder is fine).
-
 Usage (defaults shown):
     python train_centralized.py \
         --N 2000 --t 20 --m 15 --r 5 \

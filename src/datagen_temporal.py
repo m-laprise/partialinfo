@@ -350,6 +350,9 @@ class TemporalData(Dataset):
         self.task = task
         if self.task == 'nonlinear':
             self.random_mlp = RandomLinearHead(self.m, 1)
+            self.random_mlp.eval()
+            for p in self.random_mlp.parameters():
+                p.requires_grad_(False)
         
         self.verbose = verbose
         self.stats = self.__summary()
@@ -363,9 +366,10 @@ class TemporalData(Dataset):
     def _generate_ycol(self, matrix):
         if matrix.ndimension() == 2:
             matrix = matrix.unsqueeze(0)
-        vectorized_mlp = torch.func.vmap(self._mlp_apply)
-        y_column = vectorized_mlp(matrix).squeeze(0)
-        return y_column.detach()
+        with torch.no_grad():
+            vectorized_mlp = torch.func.vmap(self._mlp_apply)
+            y_column = vectorized_mlp(matrix).squeeze(0)
+        return y_column
     
     def _generate_label(self, matrix, y_column):
         if self.task == 'argmax':

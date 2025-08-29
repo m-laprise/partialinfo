@@ -254,7 +254,7 @@ class DistributedDotGAT(nn.Module):
         for _ in range(self.message_steps):
             h = h + self.residual_drop1(self.DotGAT(self.attnorm(h), attn_bias))
             h = h + self.residual_drop2(self._mlp(self.mlpnorm(h)))
-        return h
+        return self.attnorm(h)
     
     def forward(self, x):
         # x: [batch, num_agents, d_in]

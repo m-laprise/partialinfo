@@ -309,8 +309,8 @@ if __name__ == '__main__':
         )
         test_stats = (test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y)
         print("Test Set Performance | ",
-              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Diversity_m: {test_diversity_m:.2f}, ",
-              f"MSE_y: {test_mse_y:.2e}, Diversity_y: {test_diversity_y:.2f}")
+              f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
+              f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
 
     log_training_run(
         file_base, args, stats, test_stats, 

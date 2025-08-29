@@ -224,7 +224,7 @@ def _gen_U_col(vcovU: torch.Tensor, *, offset: float) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _generate_U(vcovsU: torch.Tensor, *, offset: float = 5.0):
+def _generate_U(vcovsU: torch.Tensor, *, offset: float = 0.0):
     r, t, _ = vcovsU.shape
     U = torch.zeros(t, r)
     for col in range(r):

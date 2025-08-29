@@ -23,11 +23,10 @@ import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
-from utils.setup import create_data
+from utils.setup import create_data, setup_model
 from utils.training_temporal import (
     evaluate,
     stacked_cross_entropy_loss,
@@ -84,7 +83,6 @@ if __name__ == '__main__':
     parser.add_argument("--no-sharedv", dest="sharedv", action="store_false", 
                         help="Agents have their own V embedding matrices")
     parser.set_defaults(sharedv=True)
-    
     args = parser.parse_args()
     
     if args.task == 'argmax':
@@ -102,26 +100,17 @@ if __name__ == '__main__':
         print(f"CUDNN version: {torch.backends.cudnn.version()}")
         torch.backends.cudnn.benchmark = True
     
+    # SETUP DATA
     train_loader, val_loader, test_loader, sensingmasks = create_data(args)
-
-    model = DistributedDotGAT(
-        device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
-        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, 
-        dropout=args.dropout, message_steps=args.steps, adjacency_mode=args.adjacency_mode, 
-        k=args.nb_ties, sensing_masks=sensingmasks
-    ).to(device)
-    count_parameters(model)
     
-    if task_cat == 'classif':
-        aggregator = CollectiveClassifier(
-            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
-        ).to(device)
-    elif task_cat == 'regression':
-        aggregator = CollectiveInferPredict(
-            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
-        ).to(device)
+    # SETUP MODEL
+    model, aggregator = setup_model(args, sensingmasks, device, task_cat)
+    count_parameters(model)
     count_parameters(aggregator)
     print("--------------------------")
+    
+    model = model.to(device)
+    aggregator = aggregator.to(device)
     
     if torch.cuda.is_available():
         print("Compiling model and aggregator with torch.compile...")  
@@ -129,6 +118,7 @@ if __name__ == '__main__':
         aggregator = torch.compile(aggregator, mode='reduce-overhead', fullgraph=True)
         print("torch.compile done.")
     
+    # SET UP TRAINING
     optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
@@ -136,20 +126,21 @@ if __name__ == '__main__':
     scaler = GradScaler(enabled=(device.type == 'cuda'))
     criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
     
+    # SET UP LOGGING, CHECKPOINTING, AND EARLY STOPPING
     stats = init_stats(task_cat)
     file_base = unique_filename()
     checkpoint_path = f"{file_base}_checkpoint.pt"
-
     best = {"loss": float('inf'), "acc": float('-inf')}
     patience_counter = 0
     val_acc = 0.0
 
-    # print time at beginning of training
+    # PRINT TIME
     start = datetime.now()
     if device.type == 'cuda':
         torch.cuda.synchronize()
     print(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
     
+    # TRAINING LOOP
     for epoch in range(1, args.epochs + 1):
         train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
         scheduler.step()
@@ -248,6 +239,7 @@ if __name__ == '__main__':
     else:
         print("No checkpoint found; using current in-memory weights.")
 
+    # SAVE TRAINING CURVE PLOT
     if task_cat == 'classif':
         random_accuracy = 1.0 / args.m
         plot_classif(stats, file_base, random_accuracy)
@@ -255,7 +247,7 @@ if __name__ == '__main__':
         plot_regression(stats, file_base)
 
     
-    # Final test evaluation on fresh data
+    # EVALUATE ON TEST DATA
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
@@ -272,6 +264,7 @@ if __name__ == '__main__':
               f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
               f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
 
+    # SAVE LOGS
     log_training_run(
         file_base, args, stats, test_stats, 
         start, end, model, aggregator, task_cat

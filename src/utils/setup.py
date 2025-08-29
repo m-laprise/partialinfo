@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from datagen_temporal import GTMatrices, SensingMasks, TemporalData
+from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 
 
 def create_data(args):
@@ -49,3 +50,23 @@ def create_data(args):
         num_workers=num_workers
     )
     return train_loader, val_loader, test_loader, sensingmasks
+
+def setup_model(args, sensingmasks, device, task_cat):
+    model = DistributedDotGAT(
+        device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
+        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, 
+        dropout=args.dropout, message_steps=args.steps, adjacency_mode=args.adjacency_mode, 
+        k=args.nb_ties, sensing_masks=sensingmasks
+    )
+    
+    if task_cat == 'classif':
+        aggregator = CollectiveClassifier(
+            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
+        )
+        
+    elif task_cat == 'regression':
+        aggregator = CollectiveInferPredict(
+            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
+        )
+    
+    return model, aggregator

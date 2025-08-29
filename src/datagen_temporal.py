@@ -232,6 +232,7 @@ def _generate_U(vcovsU: torch.Tensor, *, offset: float = 0.0):
     return U
 
 
+@torch.no_grad()
 def _fin_return(val_start, val_end):
     return (val_end - val_start) / val_start
 
@@ -318,6 +319,7 @@ class GTMatrices(Dataset):
 
 
 class RandomLinearHead(nn.Module):
+    @torch.no_grad()
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.in_dim = in_dim

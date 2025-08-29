@@ -57,8 +57,8 @@ def printlog(task, epoch, stats):
               f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}")
     else:
         print(f"Ep {epoch:03d}. ",
-              f"Loss: {stats['train_loss'][-1]:.2e} | T var y: {stats['t_diversity_y'][-1]:.2f} || V loss: {stats['val_loss'][-1]:.2e} |",
-              f"V mse_m: {stats['val_mse_m'][-1]:.2e} | V mse_y: {stats['val_mse_y'][-1]:.2e} || V var m: {stats['val_diversity_m'][-1]:.2f} | V var y: {stats['val_diversity_y'][-1]:.2f}")
+              f"Loss: {stats['train_loss'][-1]:.4f} | T var y: {stats['t_diversity_y'][-1]:.2f} || V loss: {stats['val_loss'][-1]:.4f} |",
+              f"V mse_m: {stats['val_mse_m'][-1]:.4f} | V mse_y: {stats['val_mse_y'][-1]:.4f} || V var m: {stats['val_diversity_m'][-1]:.2f} | V var y: {stats['val_diversity_y'][-1]:.2f}")
     pass
 
 

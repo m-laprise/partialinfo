@@ -166,7 +166,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = GradScaler(enabled=(device.type == 'cuda'))
     criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
     

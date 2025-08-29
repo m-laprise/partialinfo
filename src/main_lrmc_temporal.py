@@ -153,7 +153,7 @@ if __name__ == '__main__':
     elif task_cat == 'regression':
         aggregator = CollectiveInferPredict(
             num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
-        )
+        ).to(device)
     count_parameters(aggregator)
     print("--------------------------")
     
@@ -166,7 +166,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = GradScaler(enabled=(device.type == 'cuda'))
     criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
     
@@ -309,8 +309,8 @@ if __name__ == '__main__':
         )
         test_stats = (test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y)
         print("Test Set Performance | ",
-              f"Loss: {test_loss:.2e}, MSE_m: {test_mse_m:.2e}, Diversity_m: {test_diversity_m:.2f}, ",
-              f"MSE_y: {test_mse_y:.2e}, Diversity_y: {test_diversity_y:.2f}")
+              f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
+              f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
 
     log_training_run(
         file_base, args, stats, test_stats, 

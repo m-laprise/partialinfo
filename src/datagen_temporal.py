@@ -224,7 +224,7 @@ def _gen_U_col(vcovU: torch.Tensor, *, offset: float) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _generate_U(vcovsU: torch.Tensor, *, offset: float = 5.0):
+def _generate_U(vcovsU: torch.Tensor, *, offset: float = 0.0):
     r, t, _ = vcovsU.shape
     U = torch.zeros(t, r)
     for col in range(r):
@@ -232,6 +232,7 @@ def _generate_U(vcovsU: torch.Tensor, *, offset: float = 5.0):
     return U
 
 
+@torch.no_grad()
 def _fin_return(val_start, val_end):
     return (val_end - val_start) / val_start
 
@@ -318,6 +319,7 @@ class GTMatrices(Dataset):
 
 
 class RandomLinearHead(nn.Module):
+    @torch.no_grad()
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.in_dim = in_dim
@@ -348,6 +350,9 @@ class TemporalData(Dataset):
         self.task = task
         if self.task == 'nonlinear':
             self.random_mlp = RandomLinearHead(self.m, 1)
+            self.random_mlp.eval()
+            for p in self.random_mlp.parameters():
+                p.requires_grad_(False)
         
         self.verbose = verbose
         self.stats = self.__summary()
@@ -361,8 +366,9 @@ class TemporalData(Dataset):
     def _generate_ycol(self, matrix):
         if matrix.ndimension() == 2:
             matrix = matrix.unsqueeze(0)
-        vectorized_mlp = torch.func.vmap(self._mlp_apply)
-        y_column = vectorized_mlp(matrix).squeeze(0)
+        with torch.no_grad():
+            vectorized_mlp = torch.func.vmap(self._mlp_apply)
+            y_column = vectorized_mlp(matrix).squeeze(0)
         return y_column
     
     def _generate_label(self, matrix, y_column):
@@ -387,7 +393,6 @@ class TemporalData(Dataset):
         return sample
     
     def __summary(self):
-        # TO DEBUG
         S = torch.linalg.svdvals(self.data)
         if self.r < min(self.t, self.m):
             gap = np.mean((S[:, self.r - 1] - S[:, self.r]).tolist())

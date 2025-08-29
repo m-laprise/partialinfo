@@ -153,7 +153,7 @@ if __name__ == '__main__':
     elif task_cat == 'regression':
         aggregator = CollectiveInferPredict(
             num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
-        )
+        ).to(device)
     count_parameters(aggregator)
     print("--------------------------")
     

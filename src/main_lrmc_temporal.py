@@ -22,9 +22,8 @@ import matplotlib.pyplot as plt
 import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
 
-from datagen_temporal import GTMatrices, SensingMasks, TemporalData
+from datagen_temporal import create_data
 from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
@@ -103,40 +102,7 @@ if __name__ == '__main__':
         print(f"CUDNN version: {torch.backends.cudnn.version()}")
         torch.backends.cudnn.benchmark = True
     
-    with torch.no_grad():  
-        train_GT = GTMatrices(N=args.train_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
-                              mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
-        val_GT =   GTMatrices(N=args.val_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
-                              mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
-        test_GT =  GTMatrices(N=args.test_n, t=args.t, m=args.m, r=args.r, realizations = args.nres,
-                              mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
-        train_data = TemporalData(train_GT, task=args.task)
-        val_data =   TemporalData(val_GT, task=args.task, verbose=False)
-        test_data =  TemporalData(test_GT, task=args.task, verbose=False)
-        sensingmasks = SensingMasks(train_data, args.r, args.num_agents, args.density)
-    
-    num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0 # type: ignore
-    print(f"Number of workers: {num_workers}")
-    pin = torch.cuda.is_available()
-    persistent = num_workers > 0
-    train_loader = DataLoader(
-        train_data, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        pin_memory=pin, 
-        num_workers=num_workers,
-        persistent_workers=persistent,
-        prefetch_factor=2 if persistent else None,
-        drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_data, 
-        batch_size=args.batch_size, 
-        pin_memory=pin, 
-        num_workers=num_workers,
-        persistent_workers=persistent,
-        prefetch_factor=2 if persistent else None,
-    )
+    train_loader, val_loader, test_loader, sensingmasks = create_data(args)
 
     model = DistributedDotGAT(
         device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
@@ -290,12 +256,6 @@ if __name__ == '__main__':
 
     
     # Final test evaluation on fresh data
-    test_loader = DataLoader(
-        test_data, 
-        batch_size=args.batch_size, 
-        pin_memory=pin, 
-        num_workers=num_workers
-    )
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat

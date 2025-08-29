@@ -182,7 +182,8 @@ def regression_acc_agree(logits, target):
     avg_preds = logits.mean(dim=1)
 
     # Per-example, per-entry MSE -> [B]; then sum across batch
-    mse_per_example = ((avg_preds - target) ** 2).mean(dim=1)  # mean over D
+    #mse_per_example = ((avg_preds - target) ** 2).mean(dim=1)  # mean over D
+    mse_per_example = nn.MSELoss(reduction='none')(avg_preds, target).mean(dim=1)
     batch_mse_sum = mse_per_example.sum().item()
 
     # Inter-agent diversity

@@ -23,11 +23,11 @@ import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from datagen_temporal import create_data
 from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
+from utils.setup import create_data
 from utils.training_temporal import (
     evaluate,
     stacked_cross_entropy_loss,

@@ -365,7 +365,7 @@ class TemporalData(Dataset):
             matrix = matrix.unsqueeze(0)
         vectorized_mlp = torch.func.vmap(self._mlp_apply)
         y_column = vectorized_mlp(matrix).squeeze(0)
-        return y_column
+        return y_column.detach()
     
     def _generate_label(self, matrix, y_column):
         if self.task == 'argmax':
@@ -389,7 +389,6 @@ class TemporalData(Dataset):
         return sample
     
     def __summary(self):
-        # TO DEBUG
         S = torch.linalg.svdvals(self.data)
         if self.r < min(self.t, self.m):
             gap = np.mean((S[:, self.r - 1] - S[:, self.r]).tolist())

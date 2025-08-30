@@ -3,7 +3,7 @@ import os
 import platform
 import subprocess
 import tempfile
-from typing import Dict, Iterable, List, Mapping, Sequence, Union
+from typing import Dict, List, Mapping, Sequence, Union
 
 import psutil
 import torch
@@ -159,8 +159,9 @@ def log_training_run(
             f.write("-----------------\n")
             f.write("Epoch | Train Loss | Train Acc | T % maj | Val Loss | Val Acc | V % maj\n")
             f.write("------|------------|-----------|---------|----------|---------|---------\n")
-            for i, (tl, ta, tm, vl, va, vm) in enumerate(zip(stats["train_loss"], stats["t_accuracy"], stats["t_agreement"],
-                                                    stats["val_loss"], stats["val_accuracy"], stats["val_agreement"]), 1):
+            for i, (tl, ta, tm, vl, va, vm) in enumerate(
+                zip(stats["train_loss"], stats["t_accuracy"], stats["t_agreement"],
+                    stats["val_loss"], stats["val_accuracy"], stats["val_agreement"]), 1):
                 f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f}    | {vl:.2e} | {va:.2f}    | {vm:.2f}\n")
         
         else:

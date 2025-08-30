@@ -150,51 +150,23 @@ if __name__ == '__main__':
     
     # TRAINING LOOP
     for epoch in range(1, args.epochs + 1):
+        # TRAIN
         train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
         scheduler.step()
         stats["train_loss"].append(train_loss)
         
+        # EVALUATE
         keyset = METRIC_KEYS["classif"] if task_cat == "classif" else METRIC_KEYS["regression"]
         train_eval = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat)
         val_eval   = evaluate(model, aggregator, val_loader,   criterion, device, task=task_cat)
         train_metrics = pack_metrics(train_eval, keyset)
         val_metrics   = pack_metrics(val_eval,   keyset)
-        
         for metric_name in keyset:
             if metric_name == "loss":
                 stats["val_loss"].append(val_metrics["loss"])
                 continue
             stats[f"t_{metric_name}"].append(train_metrics[metric_name])
             stats[f"val_{metric_name}"].append(val_metrics[metric_name])
-        
-        """ if task_cat == 'classif':
-            _, t_acc, t_agree = evaluate(                                       # type: ignore
-                model, aggregator, train_loader, criterion, device, task=task_cat
-            ) 
-            val_loss, val_acc, val_agree = evaluate(                            # type: ignore
-                model, aggregator, val_loader, criterion, device, task=task_cat
-            ) 
-            stats["t_accuracy"].append(t_acc)
-            stats["t_agreement"].append(t_agree)
-            stats["val_loss"].append(val_loss)
-            stats["val_accuracy"].append(val_acc)
-            stats["val_agreement"].append(val_agree)
-        else:
-            _, t_mse_m, t_diversity_m, t_mse_y, t_diversity_y = evaluate(            # type: ignore
-                model, aggregator, train_loader, criterion, device, task=task_cat
-            )
-            val_loss, val_mse_m, val_diversity_m, val_mse_y, val_diversity_y = evaluate(  # type: ignore
-                model, aggregator, val_loader, criterion, device, task=task_cat
-            )
-            stats["t_mse_m"].append(t_mse_m)
-            stats["t_diversity_m"].append(t_diversity_m)
-            stats["t_mse_y"].append(t_mse_y)
-            stats["t_diversity_y"].append(t_diversity_y)
-            stats["val_loss"].append(val_loss)
-            stats["val_mse_m"].append(val_mse_m)
-            stats["val_diversity_m"].append(val_diversity_m)
-            stats["val_mse_y"].append(val_mse_y)
-            stats["val_diversity_y"].append(val_diversity_y) """
         
         if epoch == 1:
             if device.type == 'cuda':
@@ -205,6 +177,7 @@ if __name__ == '__main__':
         if epoch % 10 == 0 or epoch == 1:
             printlog(task_cat, epoch, stats, METRIC_KEYS)
         
+        # CHECKPOINT AND EARLY STOPPING
         val_loss = val_metrics["loss"]
         val_acc = val_metrics["accuracy"] if task_cat == 'classif' else 0.0
         
@@ -224,7 +197,7 @@ if __name__ == '__main__':
         else:
             patience_counter += 1
             
-        if val_acc == 1.0:
+        if val_acc == 1.0 or val_loss < 1e-5:
             print(f"Early stopping at epoch {epoch}; validation accuracy is 100%.")
             break
         if val_loss > (10 * stats['val_loss'][0]):

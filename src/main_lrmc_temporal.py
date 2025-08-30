@@ -128,7 +128,14 @@ if __name__ == '__main__':
     criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
     
     # SET UP LOGGING, CHECKPOINTING, AND EARLY STOPPING
-    stats = init_stats(task_cat)
+    METRIC_KEYS = {
+        "classif": ["loss", "accuracy", "agreement"],
+        "regression": ["loss", "mse_m", "diversity_m", "mse_y", "diversity_y"],
+    }
+    def pack_metrics(values_tuple, keys):
+        return dict(zip(keys, values_tuple))
+    
+    stats = init_stats(task_cat, METRIC_KEYS)
     file_base = unique_filename()
     checkpoint_path = f"{file_base}_checkpoint.pt"
     best = {"loss": float('inf'), "acc": float('-inf')}
@@ -146,7 +153,21 @@ if __name__ == '__main__':
         train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
         scheduler.step()
         stats["train_loss"].append(train_loss)
-        if task_cat == 'classif':
+        
+        keyset = METRIC_KEYS["classif"] if task_cat == "classif" else METRIC_KEYS["regression"]
+        train_eval = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat)
+        val_eval   = evaluate(model, aggregator, val_loader,   criterion, device, task=task_cat)
+        train_metrics = pack_metrics(train_eval, keyset)
+        val_metrics   = pack_metrics(val_eval,   keyset)
+        
+        for metric_name in keyset:
+            if metric_name == "loss":
+                stats["val_loss"].append(val_metrics["loss"])
+                continue
+            stats[f"t_{metric_name}"].append(train_metrics[metric_name])
+            stats[f"val_{metric_name}"].append(val_metrics[metric_name])
+        
+        """ if task_cat == 'classif':
             _, t_acc, t_agree = evaluate(                                       # type: ignore
                 model, aggregator, train_loader, criterion, device, task=task_cat
             ) 
@@ -173,7 +194,7 @@ if __name__ == '__main__':
             stats["val_mse_m"].append(val_mse_m)
             stats["val_diversity_m"].append(val_diversity_m)
             stats["val_mse_y"].append(val_mse_y)
-            stats["val_diversity_y"].append(val_diversity_y)
+            stats["val_diversity_y"].append(val_diversity_y) """
         
         if epoch == 1:
             if device.type == 'cuda':
@@ -182,7 +203,10 @@ if __name__ == '__main__':
             print(f"Time elapsed for first epoch: {(t1 - start).total_seconds():.4f} seconds.")
             
         if epoch % 10 == 0 or epoch == 1:
-            printlog(task_cat, epoch, stats)
+            printlog(task_cat, epoch, stats, METRIC_KEYS)
+        
+        val_loss = val_metrics["loss"]
+        val_acc = val_metrics["accuracy"] if task_cat == 'classif' else 0.0
         
         if task_cat == 'classif':
             improved = (val_acc > best["acc"] + 1e-5) | \

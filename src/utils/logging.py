@@ -3,6 +3,7 @@ import os
 import platform
 import subprocess
 import tempfile
+from typing import Dict, Iterable, List, Mapping, Sequence, Union
 
 import psutil
 import torch
@@ -25,32 +26,40 @@ def snapshot(model, aggregator, epoch, args):
     }
     
 
-def init_stats(task_cat):
-    if task_cat == 'classif':
-        return {
-            "train_loss": [],
-            "t_accuracy": [],
-            "t_agreement": [],
-            "val_loss": [],
-            "val_accuracy": [],
-            "val_agreement": []
-        }
+def init_stats(
+    task_cat: str,
+    metric_keys: Union[Mapping[str, Sequence[str]], Sequence[str]]
+) -> Dict[str, List[float]]:
+    """
+    Create the `stats` dict for `task_cat`.
+
+    The function always creates:
+      - "train_loss" (filled by train())
+      - "val_loss"   (filled by evaluate on val_loader)
+      - "t_<metric>" and "val_<metric>" for every metric in the list
+
+    Example:
+      METRIC_KEYS = {"classif": ["accuracy","agreement"], "regression": ["mse_m","diversity_m", ...]}
+      stats = init_stats("classif", METRIC_KEYS)
+    """
+    if isinstance(metric_keys, Mapping):
+        try:
+            metrics = list(metric_keys[task_cat])
+        except KeyError:
+            raise ValueError(f"task_cat '{task_cat}' not found in metric_keys mapping")
     else:
-        return {
-            "train_loss": [],
-            "t_mse_m": [],
-            "t_diversity_m": [],
-            "t_mse_y": [],
-            "t_diversity_y": [],
-            "val_loss": [],
-            "val_mse_m": [],
-            "val_diversity_m": [],
-            "val_mse_y": [],
-            "val_diversity_y": []
-        }
+        metrics = list(metric_keys)
+    stats: Dict[str, List[float]] = {
+        "train_loss": [],
+        "val_loss": []
+    }
+    for m in metrics:
+        stats[f"t_{m}"] = []
+        stats[f"val_{m}"] = []
+    return stats
 
 
-def printlog(task, epoch, stats):
+def printlog(task, epoch, stats, METRIC_KEYS):
     if task == 'classif':
         print(f"Ep {epoch:03d}. ",
               f"T loss: {stats['train_loss'][-1]:.2e} | T acc: {stats['t_accuracy'][-1]:.2f} | T % maj: {stats['t_agreement'][-1]:.2f} | ",

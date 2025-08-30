@@ -6,16 +6,17 @@ Example usage:
 ```
 uv run ./src/main_lrmc_temporal.py \
   --t 50 --m 25 --r 6 --density 0.5 \
-  --num_agents 64 --nb_ties 4 --hidden_dim 64 \
+  --num-agents 64 --nb_ties 4 --hidden-dim 64 \
   --lr 1e-4 --epochs 150 --steps 5 \
-  --batch_size 100 --train_n 1000 --no-sharedv \
-  --gt_mode 'value' --kernel 'cauchy' --vtype 'random' --task 'argmax'
+  --batch-size 100 --train-n 1000 --no-sharedv \
+  --gt-mode 'value' --kernel 'cauchy' --vtype 'random' --task 'argmax'
 ```
 """
 
 import argparse
 import gc
 import os
+from dataclasses import asdict
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -23,6 +24,7 @@ import torch
 from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from cli_config import Config, build_parser_from_dataclass, load_config
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
@@ -40,58 +42,19 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    # Ground truth and sensing hyperparameters
-    parser.add_argument('--t', type=int, default=50, 
-                        help='Number of rows in each ground truth matrix')
-    parser.add_argument('--m', type=int, default=25, 
-                        help='Number of columns in each ground truth matrix')
-    parser.add_argument('--r', type=int, default=25, help='Rank of each ground truth matrix')
-    parser.add_argument('--gt_mode', type=str, default='value', choices=['value', 'return'], 
-                        help='Kind of ground truth matrices (absolute value or relative return)')
-    parser.add_argument('--kernel', type=str, default='cauchy', choices=['matern', 'cauchy', 'whitenoise'], 
-                        help='Type of vcov for columns of U factors')
-    parser.add_argument('--vtype', type=str, default='random', choices=['random', 'block'], 
-                        help='Random or block diagonal V factors')
-    parser.add_argument('--task', type=str, default='nonlinear', choices=['argmax', 'nonlinear'], 
-                        help='Prediction task: argmax or arbitrary nonlinear function of row t+1')
-    parser.add_argument('--density', type=float, default=0.5, 
-                        help='Target proportion of known entries in each ground truth matrix')
-    parser.add_argument('--num_agents', type=int, default=20, help='Number of agents')
-    # Model hyperparameters
-    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension of the model')
-    # Message passing hyperparameters
-    parser.add_argument('--att_heads', type=int, default=4, 
-                        help='Number of attention heads in the message passing layers') 
-    parser.add_argument('--adjacency_mode', type=str, default='learned', choices=['none', 'learned'], 
-                        help='Whether adjacency matrix for message-passing is all-to-all or learned')
-    parser.add_argument('--nb_ties', type=int, default=4, help='Number of ties for each agent (k)')
-    parser.add_argument('--steps', type=int, default=5, 
-                        help='Number of message passing steps. If 0, the model reduces to an encoder-decoder.')
-    # Training hyperparameters
-    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout probability during training')
-    parser.add_argument('--lr', type=float, default=0.001, help='Initial learning rate')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
-    parser.add_argument('--patience', type=int, default=0, help='Early stopping patience')
-    parser.add_argument('--train_n', type=int, default=800, help='Number of training matrices')
-    parser.add_argument('--val_n', type=int, default=400, help='Number of validation matrices')
-    parser.add_argument('--test_n', type=int, default=400, help='Number of test matrices')
-    parser.add_argument('--nres', type=int, default=10, help='Number of realizations per DGP')
-    parser.add_argument("--sharedv", dest="sharedv", action="store_true", 
-                        help="Agents share a V embedding matrix")
-    parser.add_argument("--no-sharedv", dest="sharedv", action="store_false", 
-                        help="Agents have their own V embedding matrices")
-    parser.set_defaults(sharedv=True)
-    args = parser.parse_args()
+if __name__ == "__main__":
+    parser = build_parser_from_dataclass(Config)
+    parsed = parser.parse_args()
+    cfg = load_config(parsed, Config)
+
+    print("Effective config:", asdict(cfg))
     
-    if args.task == 'argmax':
+    if cfg.task == 'argmax':
         task_cat = 'classif'
-    elif args.task == 'nonlinear':
+    elif cfg.task == 'nonlinear':
         task_cat = 'regression'
     else:
-        raise NotImplementedError(f"Task {args.task} not implemented")
+        raise NotImplementedError(f"Task {cfg.task} not implemented")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -102,10 +65,10 @@ if __name__ == '__main__':
         torch.backends.cudnn.benchmark = True
     
     # SETUP DATA
-    train_loader, val_loader, test_loader, sensingmasks = create_data(args)
+    train_loader, val_loader, test_loader, sensingmasks = create_data(cfg)
     
     # SETUP MODEL
-    model, aggregator = setup_model(args, sensingmasks, device, task_cat)
+    model, aggregator = setup_model(cfg, sensingmasks, device, task_cat)
     count_parameters(model)
     count_parameters(aggregator)
     print("--------------------------")
@@ -121,9 +84,9 @@ if __name__ == '__main__':
     
     # SET UP TRAINING
     optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(aggregator.parameters()), lr=args.lr
+        list(model.parameters()) + list(aggregator.parameters()), lr=cfg.lr
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=1e-6)
     scaler = GradScaler(enabled=(device.type == 'cuda'))
     criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
     
@@ -149,7 +112,7 @@ if __name__ == '__main__':
     print(f"Start time: {start.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # TRAINING LOOP
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, cfg.epochs + 1):
         # TRAIN
         train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
         scheduler.step()
@@ -168,6 +131,7 @@ if __name__ == '__main__':
             stats[f"t_{metric_name}"].append(train_metrics[metric_name])
             stats[f"val_{metric_name}"].append(val_metrics[metric_name])
         
+        # PRINT
         if epoch == 1:
             if device.type == 'cuda':
                 torch.cuda.synchronize()
@@ -192,7 +156,7 @@ if __name__ == '__main__':
                 best.update(loss=val_loss, acc=val_acc, epoch=epoch)
             else:
                 best.update(loss=val_loss, epoch=epoch)
-            atomic_save(snapshot(model, aggregator, epoch, args), checkpoint_path)
+            atomic_save(snapshot(model, aggregator, epoch, cfg), checkpoint_path)
             patience_counter = 0
         else:
             patience_counter += 1
@@ -203,8 +167,8 @@ if __name__ == '__main__':
         if val_loss > (10 * stats['val_loss'][0]):
             print(f"Early stopping at epoch {epoch}; validation loss is diverging.")
             break
-    #    if args.patience > 0 and patience_counter >= args.patience:
-    #        print(f"Early stopping at epoch {epoch}; no improvement for {args.patience} epochs.")
+    #    if cfg.patience > 0 and patience_counter >= args.patience:
+    #        print(f"Early stopping at epoch {epoch}; no improvement for {cfg.patience} epochs.")
     #        break
         
     end = datetime.now()
@@ -231,7 +195,7 @@ if __name__ == '__main__':
 
     # SAVE TRAINING CURVE PLOT
     if task_cat == 'classif':
-        random_accuracy = 1.0 / args.m
+        random_accuracy = 1.0 / cfg.m
         plot_classif(stats, file_base, random_accuracy)
     else:
         plot_regression(stats, file_base)
@@ -241,7 +205,7 @@ if __name__ == '__main__':
 
     # SAVE LOGS
     log_training_run(
-        file_base, args, stats, test_stats, 
+        file_base, cfg, stats, test_stats, 
         start, end, model, aggregator, task_cat
     )
 

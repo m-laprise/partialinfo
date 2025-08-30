@@ -29,6 +29,7 @@ from utils.plotting import plot_classif, plot_regression
 from utils.setup import create_data, setup_model
 from utils.training_temporal import (
     evaluate,
+    final_test,
     stacked_cross_entropy_loss,
     stacked_MSE,
     train,
@@ -183,14 +184,6 @@ if __name__ == '__main__':
         if epoch % 10 == 0 or epoch == 1:
             printlog(task_cat, epoch, stats)
         
-        # Save connectivity matrix for visualization
-        """netxmask = model.connect.learn_mask.detach().cpu().numpy().astype(int)
-        netx = model.connect()[0].detach().cpu().numpy()
-        netx[netx == float('-inf')] = 0.0
-        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-        ax.matshow(netxmask, cmap='gray', vmin=0, vmax=netxmask.max())
-        fig.show()"""
-        
         if task_cat == 'classif':
             improved = (val_acc > best["acc"] + 1e-5) | \
                 (val_acc >= best["acc"] - 1e-2 and val_loss < best["loss"] - 1e-5)
@@ -245,24 +238,9 @@ if __name__ == '__main__':
         plot_classif(stats, file_base, random_accuracy)
     else:
         plot_regression(stats, file_base)
-
     
     # EVALUATE ON TEST DATA
-    if task_cat == 'classif':
-        test_loss, test_acc, test_agree = evaluate(                             # type: ignore
-            model, aggregator, test_loader, criterion, device, task=task_cat
-        )
-        test_stats = (test_loss, test_acc, test_agree)
-        print("Test Set Performance | ",
-            f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
-    else:
-        test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = evaluate(   # type: ignore
-            model, aggregator, test_loader, criterion, device, task=task_cat
-        )
-        test_stats = (test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y)
-        print("Test Set Performance | ",
-              f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
-              f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
+    test_stats = final_test(model, aggregator, test_loader, criterion, device, task_cat)
 
     # SAVE LOGS
     log_training_run(

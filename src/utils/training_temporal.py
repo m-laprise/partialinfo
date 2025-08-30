@@ -280,3 +280,20 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
             float(mean_diversity_y)
         )
 
+def final_test(model, aggregator, test_loader, criterion, device, task_cat):
+    if task_cat == 'classif':
+        test_loss, test_acc, test_agree = evaluate(                             # type: ignore
+            model, aggregator, test_loader, criterion, device, task=task_cat
+        )
+        test_stats = (test_loss, test_acc, test_agree)
+        print("Test Set Performance | ",
+              f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
+    else:
+        test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = evaluate(   # type: ignore
+            model, aggregator, test_loader, criterion, device, task=task_cat
+        )
+        test_stats = (test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y)
+        print("Test Set Performance | ",
+              f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
+              f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
+    return test_stats

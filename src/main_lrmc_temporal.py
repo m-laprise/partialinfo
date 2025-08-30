@@ -160,7 +160,7 @@ if __name__ == '__main__':
             stats["val_agreement"].append(val_agree)
         else:
             _, t_mse_m, t_diversity_m, t_mse_y, t_diversity_y = evaluate(            # type: ignore
-                model, aggregator, val_loader, criterion, device, task=task_cat
+                model, aggregator, train_loader, criterion, device, task=task_cat
             )
             val_loss, val_mse_m, val_diversity_m, val_mse_y, val_diversity_y = evaluate(  # type: ignore
                 model, aggregator, val_loader, criterion, device, task=task_cat

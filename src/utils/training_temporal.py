@@ -280,6 +280,7 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
             float(mean_diversity_y)
         )
 
+
 def final_test(model, aggregator, test_loader, criterion, device, task_cat):
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore

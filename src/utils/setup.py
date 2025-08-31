@@ -51,6 +51,7 @@ def create_data(args):
     )
     return train_loader, val_loader, test_loader, sensingmasks
 
+
 def setup_model(args, sensingmasks, device, task_cat):
     model = DistributedDotGAT(
         device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,

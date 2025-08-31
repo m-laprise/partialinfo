@@ -140,7 +140,6 @@ class TrainableSmallWorld(nn.Module):
         learn_mask = torch.ones(A, A, dtype=torch.bool, device=device)
         learn_mask[frozen_idx[:, 0], frozen_idx[:, 1]] = False
         if symmetric:
-            # out-of-place logical-and avoids aliasing error
             learn_mask = learn_mask & learn_mask.T
         # list learnable parameters
         learnable_idx = learn_mask.nonzero(as_tuple=False)

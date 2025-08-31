@@ -92,14 +92,14 @@ def cauchy_covariance(t, *, alpha, beta, sigma2=1.0):
     beta : float, > 0, controls decay rate
     sigma2 : float, marginal variance
     """
-    vcov = torch.zeros((t, t))
-    for i in range(t):
-        for j in range(t):
-            if i <= j:
-                h = i - j
-                vcov[i, j] = vcov[j,i] = sigma2 * cauchy_correlation(h / 4, alpha=alpha, beta=beta)
+    # Vectorized Toeplitz-style construction using pairwise distances
+    idx = torch.arange(t, dtype=torch.get_default_dtype())
+    # Absolute pairwise lag matrix, with optional scaling (historical /4 kept)
+    h = (idx[:, None] - idx[None, :]).abs() / 4
+    corr = (1 + h.pow(alpha)).pow(-beta / alpha)
+    vcov = sigma2 * corr
     # Add small diagonal term for numerical stability
-    vcov += 1e-8 * torch.eye(t)
+    vcov = vcov + (1e-8) * torch.eye(t, dtype=vcov.dtype, device=vcov.device)
     return vcov
 
 
@@ -226,10 +226,13 @@ def _gen_U_col(vcovU: torch.Tensor, *, offset: float) -> torch.Tensor:
 @torch.no_grad()
 def _generate_U(vcovsU: torch.Tensor, *, offset: float = 0.0):
     r, t, _ = vcovsU.shape
-    U = torch.zeros(t, r)
-    for col in range(r):
-        U[:, col] = _gen_U_col(vcovsU[col], offset=offset)
-    return U
+    # Batched multivariate normal for all r columns at once
+    mvn = torch.distributions.MultivariateNormal(
+        loc=torch.full((r, t), offset, dtype=vcovsU.dtype, device=vcovsU.device),
+        covariance_matrix=vcovsU,
+    )
+    U_rt = mvn.rsample()  # shape: (r, t)
+    return U_rt.T  # shape: (t, r)
 
 
 @torch.no_grad()
@@ -340,16 +343,20 @@ class TemporalData(Dataset):
     Takes ground truth matrices and a task statement, and generates labeled data that can
     be provided to a DataLoader.
     """
-    def __init__(self, matrices: GTMatrices, task: str = 'argmax', verbose=True):
+    def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, target_source: str = 'observed', verbose=True):
         super().__init__()
-        if task not in ['argmax', 'nonlinear']:
+        if task not in ['argmax', 'nonlinear', 'nonlinear_seq']:
             raise NotImplementedError(f"Task {task} not implemented")
         
+        # Keep a reference to GT to optionally build targets from latent factors
+        self.gt = matrices
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
-        if self.task == 'nonlinear':
-            self.random_mlp = RandomLinearHead(self.m, 1)
+        self.target_source = target_source  # 'observed' | 'factors'
+        if self.task.startswith('nonlinear'):
+            in_dim = self.r if self.target_source == 'factors' else self.m
+            self.random_mlp = RandomLinearHead(in_dim, 1)
             self.random_mlp.eval()
             for p in self.random_mlp.parameters():
                 p.requires_grad_(False)
@@ -363,13 +370,14 @@ class TemporalData(Dataset):
     def _mlp_apply(self, x: torch.Tensor) -> torch.Tensor:
         return self.random_mlp(x)
     
-    def _generate_ycol(self, matrix):
-        if matrix.ndimension() == 2:
-            matrix = matrix.unsqueeze(0)
+    def _generate_ycol(self, idx: int, matrix: torch.Tensor):
+        # Build targets from observed features or latent factors
         with torch.no_grad():
-            vectorized_mlp = torch.func.vmap(self._mlp_apply)
-            y_column = vectorized_mlp(matrix).squeeze(0)
-        return y_column
+            if self.target_source == 'factors':
+                xin = self.gt.U[idx]
+            else:
+                xin = matrix
+            return self._mlp_apply(xin)
     
     def _generate_label(self, matrix, y_column):
         if self.task == 'argmax':
@@ -379,17 +387,19 @@ class TemporalData(Dataset):
             # Label is the last row and the last element of y
             last_row = matrix[-1, :]
             label = torch.cat((last_row, y_column[-1]))
+        elif self.task == 'nonlinear_seq':
+            # Label is the full time series of y
+            label = y_column.view(-1)
         return label
 
     def __getitem__(self, idx: int):
         _, t, m = self.data.shape
         matrix = self.data[idx, :, :]
-        y_column = self._generate_ycol(matrix) if self.task == 'nonlinear' else None
+        y_column = self._generate_ycol(idx, matrix) if self.task.startswith('nonlinear') else None
         sample = {
             'matrix': matrix.view(1, t*m),
             'label': self._generate_label(matrix, y_column)
         }
-        
         return sample
     
     def __summary(self):
@@ -417,8 +427,8 @@ def _compute_avg_overlap(masks: torch.Tensor) -> float:
     overlaps = []
     for i in range(A):
         for j in range(i + 1, A):
-            inter = (masks[i] * masks[j]).sum().item()
-            union = (masks[i] + masks[j]).clamp(0, 1).sum().item()
+            inter = (masks[i] & masks[j]).sum().item()
+            union = (masks[i] | masks[j]).sum().item()
             if union > 0:
                 overlaps.append(inter / union)
     return float(np.mean(overlaps)) if overlaps else 0.0
@@ -472,7 +482,7 @@ class SensingMasks(object):
         self.masks, self.global_known = self._generate()
         
     def __getitem__(self, idx):
-        assert idx < self.num_agents, f"Agent index {idx} is out of range"
+        assert -1 <= idx < self.num_agents, f"Agent index {idx} is out of range"
         return self.masks[idx, :] if idx != -1 else self.global_known
     
     def __call__(self, X: torch.Tensor, global_mask: bool = False):
@@ -548,9 +558,12 @@ class SensingMasks(object):
         base = max(1, num_global_known // self.num_agents)
         low = min(int(2.0 * base), num_global_known)
         high = min(int(4.0 * base), num_global_known)
-        samplesizes = np.random.randint(low, high, size=self.num_agents) if high > low else np.full(self.num_agents, low)
-        oversampled = np.sum(samplesizes > num_global_known)
-        samplesizes = np.minimum(samplesizes, num_global_known)
+        if high > low:
+            attempted = torch.randint(low, high, (self.num_agents,), dtype=torch.int64)
+        else:
+            attempted = torch.full((self.num_agents,), low, dtype=torch.int64)
+        oversampled = int((attempted > num_global_known).sum().item())
+        samplesizes = torch.minimum(attempted, torch.tensor(num_global_known, dtype=torch.int64))
         return samplesizes, oversampled
     
     def _build_agent_masks(self, global_known_idx):
@@ -558,10 +571,12 @@ class SensingMasks(object):
         masks = torch.zeros((self.num_agents, self.total_entries), dtype=torch.bool)
         samplesizes, oversampled_total = self._agent_samplesizes(num_global_known)
         for i in range(self.num_agents):
-            sample_idx = np.random.permutation(global_known_idx)[:samplesizes[i]]
+            # Randomly choose a subset (without replacement) of the global known indices
+            perm = torch.randperm(num_global_known, device=global_known_idx.device)[: int(samplesizes[i].item())]
+            sample_idx = global_known_idx[perm]
             masks[i, sample_idx] = True
             
-        return masks, torch.tensor(samplesizes), oversampled_total  
+        return masks, samplesizes, oversampled_total  
 
     def __summary(self, masks):
         self.stats["agent_overlap"] = _compute_avg_overlap(masks) if self.num_agents > 1 else -np.inf

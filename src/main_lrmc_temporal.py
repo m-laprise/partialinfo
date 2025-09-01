@@ -29,8 +29,8 @@ from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
 from utils.setup import create_data, setup_model
 from utils.training_temporal import (
-    benchmark_classif,
-    benchmark_mse_m,
+    baseline_classif,
+    baseline_mse_m,
     evaluate,
     final_test,
     stacked_cross_entropy_loss,
@@ -107,13 +107,22 @@ if __name__ == "__main__":
     val_acc = 0.0
     
     if task_cat == 'classif':
-        print(f"Accuracy for naive prediction on val set: {benchmark_classif(
+        naive_partial, naive_full = baseline_classif(
             val_loader, 
             sensingmasks.global_known, 
             cfg.t, cfg.m
-        ):.2f}")
+        )
+
+        print(f"Accuracy for naive prediction on val set with full information: {naive_full:.2f}")
+        print(f"Accuracy for naive prediction on val set with partial information: {naive_partial:.2f}")
     else:
-        print(f"MSE_m for naive prediction on val set: {benchmark_mse_m(val_loader, cfg.t, cfg.m):.4f}")
+        naive_partial, naive_full = baseline_mse_m(
+            val_loader, 
+            sensingmasks.global_known, 
+            cfg.t, cfg.m
+        )
+        print(f"MSE_m for naive prediction on val set with full information: {naive_full:.4f}")
+        print(f"MSE_m for naive prediction on val set with partial information: {naive_partial:.4f}")
 
     # PRINT TIME
     start = datetime.now()

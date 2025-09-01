@@ -281,29 +281,12 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         )
 
 
-def benchmark_mse_m(dataloader, t, m, reduction = 'mean'):
-    """
-    Returns the MSE resulting from predicting the last row of each matrix to be
-    the same as the row before last.
-    """
-    total_mse = 0.0
-    total_examples = 0
-    for batch in dataloader:
-        x = batch['matrix']
-        B, _, _ = x.shape
-        
-        targets = x.view(B, t, m)[:, -1, :]
-        predictions = x.view(B, t, m)[:, -2, :]
-        mse = nn.MSELoss(reduction=reduction)(predictions, targets)
-        total_mse += mse.item() * B
-        total_examples += B
-    return total_mse / max(total_examples, 1)
-
-
 def _last_nonzero_per_col(A: torch.Tensor,
                           mask: torch.Tensor,
                           default: float = 0.0) -> torch.Tensor:
     """
+    Takes a batch of masked t x m matrices and returns of batch of vectors of length m
+    containing the last seen entry for each column.
     A : (B, t, m) tensor
     mask : bool tensor of same shape (t, m); True where entry counts as "non-zero"
     default : scalar to place for columns with no True in mask.
@@ -336,12 +319,57 @@ def _last_nonzero_per_col(A: torch.Tensor,
     return values
 
 
-def benchmark_classif(dataloader, globalmask, t, m):
+def baseline_mse_m(dataloader, globalmask, t, m, reduction = 'mean'):
     """
-    Returns the % accuracy resulting from taking the last known (non-zero) element of each columns,
-    taking the argmax, and predicting that to be the next argmax.
+    Returns the naive baseline with partial and full information.
+    Naive means predicting x_{t + 1} = x_{t}.
+    
+    For full information, this is the MSE resulting from predicting the last row of each matrix 
+    to be the same as the row before last (including true values for masked entries).
+    
+    For partial information, masked entries are replaced by the last known element of each column.
     """
-    total_acc = 0.0
+    total_mse_full = 0.0
+    total_mse_partial = 0.0
+    total_examples = 0
+    for batch in dataloader:
+        x = batch['matrix']
+        B, _, _ = x.shape
+        x = x.view(B, t, m)
+        targets = x[:, -1, :]
+        
+        predictions_full = x[:, -2, :]
+        mse_full = nn.MSELoss(reduction=reduction)(predictions_full, targets)
+        total_mse_full += mse_full.item() * B
+        
+        globalmask = globalmask.view(t, m)
+        masked_x = torch.zeros_like(x)
+        masked_x[:, globalmask] = x[:, globalmask]
+        predictions_partial = _last_nonzero_per_col(masked_x, globalmask, default=0.0)
+        mse_partial = nn.MSELoss(reduction=reduction)(predictions_partial, targets)
+        total_mse_partial += mse_partial.item() * B
+        
+        total_examples += B
+        
+    return (
+        total_mse_partial / max(total_examples, 1), 
+        total_mse_full / max(total_examples, 1)
+    )
+
+
+def baseline_classif(dataloader, globalmask, t: int, m: int):
+    """
+    Returns the naive baseline with partial and full information.
+    Naive means predicting x_{t + 1} = x_{t}.
+    
+    For full information, this is the % accuracy resulting from taking the last element of each 
+    column (including true values for masked entries), taking the argmax, and predicting that to be 
+    the next argmax.
+    
+    For partial information, this is the % accuracy resulting from taking the last known element of each column, taking the argmax, and predicting that to be the next argmax.
+    """
+    total_acc_partial = 0.0
+    total_acc_full = 0.0
     total_examples = 0
     for batch in dataloader:
         target = batch['label']
@@ -349,18 +377,24 @@ def benchmark_classif(dataloader, globalmask, t, m):
         B, _ = x.shape
         x = x.view(B, t, m)
         
+        predictions_full = x[:, -2, :].argmax(dim=1)
+        acc_full = (predictions_full == target).float().mean().item()
+        total_acc_full += acc_full * B
+        
         globalmask = globalmask.view(t, m)
         masked_x = torch.zeros_like(x)
         masked_x[:, globalmask] = x[:, globalmask]
-        
         last_seen_row = _last_nonzero_per_col(masked_x, globalmask, default=0.0)
-
-        predictions = last_seen_row.argmax(dim=1)
-        acc = (predictions == target).float().mean().item()
-        total_acc += acc * B
+        predictions_partial = last_seen_row.argmax(dim=1)
+        acc_partial = (predictions_partial == target).float().mean().item()
+        total_acc_partial += acc_partial * B
+        
         total_examples += B
     
-    return total_acc / max(total_examples, 1)
+    return (
+        total_acc_partial / max(total_examples, 1), 
+        total_acc_full / max(total_examples, 1)
+    )
     
 
 def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg):
@@ -371,6 +405,12 @@ def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg)
         test_stats = (test_loss, test_acc, test_agree)
         print("Test Set Performance | ",
               f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
+        naive_partial, naive_full = baseline_classif(
+            test_loader, model.global_known_mask,
+            cfg.t, cfg.m
+        )
+        print(f"Accuracy for naive prediction on test set, full info: {naive_full:.2f}")
+        print(f"Accuracy for naive prediction on test set, partial info: {naive_partial:.2f}")
     else:
         test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = evaluate(   # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
@@ -380,5 +420,10 @@ def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg)
               f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
               f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
         
-        print(f"MSE_m for naive prediction on test set: {benchmark_mse_m(test_loader, cfg.t, cfg.m):.4f}")
+        naive_partial, naive_full = baseline_mse_m(
+            test_loader, model.global_known_mask,
+            cfg.t, cfg.m
+        )
+        print(f"MSE_m for naive prediction on test set, full info: {naive_full:.4f}")
+        print(f"MSE_m for naive prediction on test set, partial info: {naive_partial:.4f}")
     return test_stats

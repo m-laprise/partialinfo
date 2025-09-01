@@ -26,7 +26,7 @@ class Config:
     
     # Task and sensing hyperparameters
     task: str = field(
-        default="nonlinear", 
+        default="argmax", 
         metadata={"choices": ["argmax", "nonlinear"], 
                   "help": "Prediction task: argmax or arbitrary nonlinear function of row t+1"})
     density: float = field(default=0.5, metadata={"help": "Target proportion of known entries"})

@@ -29,6 +29,7 @@ from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
 from utils.setup import create_data, setup_model
 from utils.training_temporal import (
+    benchmark_classif,
     benchmark_mse_m,
     evaluate,
     final_test,
@@ -105,7 +106,14 @@ if __name__ == "__main__":
     patience_counter = 0
     val_acc = 0.0
     
-    print(f"MSE_m for naive prediction on val set: {benchmark_mse_m(val_loader, cfg.t, cfg.m):.4f}")
+    if task_cat == 'classif':
+        print(f"Accuracy for naive prediction on val set: {benchmark_classif(
+            val_loader, 
+            sensingmasks.global_known, 
+            cfg.t, cfg.m
+        ):.2f}")
+    else:
+        print(f"MSE_m for naive prediction on val set: {benchmark_mse_m(val_loader, cfg.t, cfg.m):.4f}")
 
     # PRINT TIME
     start = datetime.now()

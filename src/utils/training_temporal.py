@@ -283,7 +283,7 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
 
 def benchmark_mse_m(dataloader, t, m, reduction = 'mean'):
     """
-    Returns the MSE resulting from prediction the last row of each matrix to be
+    Returns the MSE resulting from predicting the last row of each matrix to be
     the same as the row before last.
     """
     total_mse = 0.0
@@ -298,6 +298,69 @@ def benchmark_mse_m(dataloader, t, m, reduction = 'mean'):
         total_mse += mse.item() * B
         total_examples += B
     return total_mse / max(total_examples, 1)
+
+
+def _last_nonzero_per_col(A: torch.Tensor,
+                          mask: torch.Tensor,
+                          default: float = 0.0) -> torch.Tensor:
+    """
+    A : (B, t, m) tensor
+    mask : bool tensor of same shape (t, m); True where entry counts as "non-zero"
+    default : scalar to place for columns with no True in mask.
+    Returns: 1D tensor of length m with dtype A.dtype on the same device as A.
+    """
+    B, t, m = A.shape
+    device = A.device
+    dtype = A.dtype
+
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+        
+    mask = mask.unsqueeze(0).expand(B, t, m)
+    # row indices broadcasted to (B, t, m)
+    rows = torch.arange(t, device=device, dtype=torch.long).view(1, t, 1).expand(B, t, m)
+    # index matrix: row index where mask True, else -1
+    idx = torch.where(mask, rows, torch.tensor(-1, device=device, dtype=torch.long))
+
+    # last index per (B,m) (-1 means none)
+    last_idx = idx.max(dim=1).values          # shape (B, m), long
+    # prepare output filled with default
+    values = torch.full((B, m), default, dtype=dtype, device=device)
+    # fill valid positions
+    valid = last_idx >= 0                     # (B, m) bool
+    if valid.any():
+        batch_idx = torch.arange(B, device=device, dtype=torch.long).unsqueeze(1).expand(B, m)
+        col_idx = torch.arange(m, device=device, dtype=torch.long).unsqueeze(0).expand(B, m)
+        values[valid] = A[batch_idx[valid], last_idx[valid], col_idx[valid]]
+
+    return values
+
+
+def benchmark_classif(dataloader, globalmask, t, m):
+    """
+    Returns the % accuracy resulting from taking the last known (non-zero) element of each columns,
+    taking the argmax, and predicting that to be the next argmax.
+    """
+    total_acc = 0.0
+    total_examples = 0
+    for batch in dataloader:
+        target = batch['label']
+        x = batch['matrix'].squeeze()
+        B, _ = x.shape
+        x = x.view(B, t, m)
+        
+        globalmask = globalmask.view(t, m)
+        masked_x = torch.zeros_like(x)
+        masked_x[:, globalmask] = x[:, globalmask]
+        
+        last_seen_row = _last_nonzero_per_col(masked_x, globalmask, default=0.0)
+
+        predictions = last_seen_row.argmax(dim=1)
+        acc = (predictions == target).float().mean().item()
+        total_acc += acc * B
+        total_examples += B
+    
+    return total_acc / max(total_examples, 1)
     
 
 def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg):

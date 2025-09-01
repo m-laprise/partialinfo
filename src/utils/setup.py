@@ -10,8 +10,11 @@ from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotG
 
 def create_data(args):
     if args.train_n // args.nres == 0:
-        raise ValueError("One data-generating process will be split between training and validation sets.",
-                         "Set nres to be a divisor of train_n to avoid leakage.")
+        if args.nres != (args.train_n + args.val_n + args.test_n):
+            raise ValueError("One data-generating process will be split between training and validation sets.",
+                            "Set nres to be a divisor of train_n to avoid leakage.")
+    if args.nres == (args.train_n + args.val_n + args.test_n):
+        print("Different realizations of a single data-generating process will be used for training, validation, and test.")
     with torch.no_grad():  
         totN = args.train_n + args.val_n + args.test_n
         all_GT = GTMatrices(N=totN, t=args.t, m=args.m, r=args.r, 

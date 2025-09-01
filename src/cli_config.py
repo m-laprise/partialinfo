@@ -31,6 +31,10 @@ class Config:
                   "help": "Prediction task: argmax or arbitrary nonlinear function of row t+1"})
     density: float = field(default=0.5, metadata={"help": "Target proportion of known entries"})
     num_agents: int = field(default=20, metadata={"help": "Number of agents"})
+    sensing_rho: float = field(default=0.25, 
+                               metadata={"help": "Controls degree of overlap in sensing mask"})
+    sensing_gamma: float = field(default=0.0, 
+                                 metadata={"help": "Controls degree of inequality in sensing mask"})
 
     # Model hyperparameters
     hidden_dim: int = field(default=128, metadata={"help": "Hidden dimension of the model"})

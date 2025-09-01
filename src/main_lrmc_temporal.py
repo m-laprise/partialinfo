@@ -29,6 +29,7 @@ from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
 from utils.setup import create_data, setup_model
 from utils.training_temporal import (
+    benchmark_mse_m,
     evaluate,
     final_test,
     stacked_cross_entropy_loss,
@@ -103,6 +104,8 @@ if __name__ == "__main__":
     best = {"loss": float('inf'), "acc": float('-inf')}
     patience_counter = 0
     val_acc = 0.0
+    
+    print(f"MSE_m for naive prediction on val set: {benchmark_mse_m(val_loader, cfg.t, cfg.m):.4f}")
 
     # PRINT TIME
     start = datetime.now()
@@ -200,7 +203,7 @@ if __name__ == "__main__":
         plot_regression(stats, file_base)
     
     # EVALUATE ON TEST DATA
-    test_stats = final_test(model, aggregator, test_loader, criterion, device, task_cat)
+    test_stats = final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg)
 
     # SAVE LOGS
     log_training_run(

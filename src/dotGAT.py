@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from datagen_temporal import SensingMasks
+from data.sensing import SensingMasks
 
 
 class DotGATHead(nn.Module):

@@ -3,7 +3,8 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from datagen_temporal import GTMatrices, SensingMasks, TemporalData
+from data.datagen_temporal import GTMatrices, TemporalData
+from data.sensing import SensingMasks
 from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 
 
@@ -16,7 +17,8 @@ def create_data(args):
         all_GT = GTMatrices(N=totN, t=args.t, m=args.m, r=args.r, 
                               realizations = args.nres, mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
         all_data = TemporalData(all_GT, task=args.task, verbose=True)
-        sensingmasks = SensingMasks(all_data, args.r, args.num_agents, args.density)
+        sensingmasks = SensingMasks(all_data, args.r, args.num_agents, args.density, 
+                                    rho=args.sensing_rho, gamma=args.sensing_gamma)
         train_data, val_data, test_data = torch.utils.data.random_split(
             all_data, [args.train_n, args.val_n, args.test_n]
         )

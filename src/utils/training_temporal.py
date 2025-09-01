@@ -281,7 +281,26 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         )
 
 
-def final_test(model, aggregator, test_loader, criterion, device, task_cat):
+def benchmark_mse_m(dataloader, t, m, reduction = 'mean'):
+    """
+    Returns the MSE resulting from prediction the last row of each matrix to be
+    the same as the row before last.
+    """
+    total_mse = 0.0
+    total_examples = 0
+    for batch in dataloader:
+        x = batch['matrix']
+        B, _, _ = x.shape
+        
+        targets = x.view(B, t, m)[:, -1, :]
+        predictions = x.view(B, t, m)[:, -2, :]
+        mse = nn.MSELoss(reduction=reduction)(predictions, targets)
+        total_mse += mse.item() * B
+        total_examples += B
+    return total_mse / max(total_examples, 1)
+    
+
+def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg):
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
@@ -297,4 +316,6 @@ def final_test(model, aggregator, test_loader, criterion, device, task_cat):
         print("Test Set Performance | ",
               f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
               f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
+        
+        print(f"MSE_m for naive prediction on test set: {benchmark_mse_m(test_loader, cfg.t, cfg.m):.4f}")
     return test_stats

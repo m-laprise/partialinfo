@@ -3,8 +3,8 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from data.datagen_temporal import GTMatrices, TemporalData
-from data.sensing import SensingMasks
+from datautils.datagen_temporal import GTMatrices, TemporalData
+from datautils.sensing import SensingMasks
 from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
 
 

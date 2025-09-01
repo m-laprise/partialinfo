@@ -220,7 +220,8 @@ if __name__ == "__main__":
         plot_regression(stats, file_base)
     
     # EVALUATE ON TEST DATA
-    test_stats = final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg)
+    test_stats = final_test(model, aggregator, test_loader, sensingmasks.global_known,
+                            criterion, device, task_cat, cfg)
 
     # SAVE LOGS
     log_training_run(

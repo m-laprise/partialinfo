@@ -397,7 +397,7 @@ def baseline_classif(dataloader, globalmask, t: int, m: int):
     )
     
 
-def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg):
+def final_test(model, aggregator, test_loader, globalmask, criterion, device, task_cat, cfg):
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
@@ -406,7 +406,7 @@ def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg)
         print("Test Set Performance | ",
               f"Loss: {test_loss:.2e}, Accuracy: {test_acc:.2f}, % maj: {test_agree:.2f}")
         naive_partial, naive_full = baseline_classif(
-            test_loader, model.global_known_mask,
+            test_loader, globalmask,
             cfg.t, cfg.m
         )
         print(f"Accuracy for naive prediction on test set, full info: {naive_full:.2f}")
@@ -421,7 +421,7 @@ def final_test(model, aggregator, test_loader, criterion, device, task_cat, cfg)
               f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
         
         naive_partial, naive_full = baseline_mse_m(
-            test_loader, model.global_known_mask,
+            test_loader, globalmask,
             cfg.t, cfg.m
         )
         print(f"MSE_m for naive prediction on test set, full info: {naive_full:.4f}")

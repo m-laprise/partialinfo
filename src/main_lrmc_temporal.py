@@ -214,9 +214,9 @@ if __name__ == "__main__":
     # SAVE TRAINING CURVE PLOT
     if task_cat == 'classif':
         random_accuracy = 1.0 / cfg.m
-        plot_classif(stats, file_base, random_accuracy)
+        plot_classif(stats, file_base, random_accuracy, naive_full_val, naive_partial_val)
     else:
-        plot_regression(stats, file_base)
+        plot_regression(stats, file_base, naive_full_val, naive_partial_val)
     
     # EVALUATE ON TEST DATA
     test_stats = final_test(model, aggregator, test_loader, sensingmasks.global_known,

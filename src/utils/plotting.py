@@ -67,7 +67,7 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     plt.close(fig)
     
 
-def plot_classif(stats, filename_base, random_accuracy):
+def plot_classif(stats, filename_base, random_accuracy, naive_full, naive_partial):
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
     # Plot loss-related metrics in two panels
     fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
@@ -85,6 +85,7 @@ def plot_classif(stats, filename_base, random_accuracy):
     axs[1].plot(epochs, stats["t_agreement"], label="Train Agreement", color='tab:blue', linestyle='dotted')
     axs[1].plot(epochs, stats["val_agreement"], label="Val Agreement", color='tab:orange', linestyle='dotted')
     axs[1].axhline(y=random_accuracy, label="Random guessing", color='tab:grey', linestyle='--')
+    axs[1].axhline(y=naive_partial, label="Naive pred., partial info", color='tab:red', linestyle='--')
     axs[1].set_title("Classification Accuracy")
     axs[1].set_xlabel("Epoch")
     axs[1].set_ylabel("% Accuracy")
@@ -97,8 +98,10 @@ def plot_classif(stats, filename_base, random_accuracy):
     plt.close(fig)
     
 
-def plot_regression(stats, filename_base):
-    epochs = np.arange(1, len(stats["train_loss"]) + 1)
+def plot_regression(stats, filename_base, naive_full, naive_partial):
+    xmin = 1
+    xmax = len(stats["train_loss"]) + 1
+    epochs = np.arange(xmin, xmax)
     # Plot loss-related metrics in two panels
     fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
     axs[0].plot(epochs, np.log(stats["train_loss"]), 
@@ -106,7 +109,13 @@ def plot_regression(stats, filename_base):
     axs[0].plot(epochs, np.log(stats["val_loss"]), 
                 label="Val Loss (all agents)", color='tab:orange')
     axs[0].plot(epochs, np.log(stats["val_mse"]), 
-                label="Val MSE (collective prediction)", color='tab:red', linestyle='--')
+                label="Val MSE (collective pred.)", color='tab:green', linestyle='--')
+    axs[0].axhline(y=naive_partial,
+                   label="Naive pred., partial info", 
+                   color='tab:red', linestyle='dotted')
+    axs[0].axhline(y=naive_full,
+                   label="Naive pred., full info", 
+                   color='tab:purple', linestyle='dotted')
     axs[0].set_title("Average of prediction error (training loss)\nand error of average prediction")
     axs[0].set_xlabel("Epoch")
     axs[0].set_ylabel("Log MSE")
@@ -119,6 +128,7 @@ def plot_regression(stats, filename_base):
     axs[1].set_title("Diversity of prediction across agents")
     axs[1].set_xlabel("Epoch")
     axs[1].set_ylabel("Variance")
+    axs[1].set_ylim(0, None)
     axs[1].grid(True)
     axs[1].legend()
     axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))

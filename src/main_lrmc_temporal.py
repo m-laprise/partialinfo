@@ -94,7 +94,7 @@ if __name__ == "__main__":
     # SET UP LOGGING, CHECKPOINTING, AND EARLY STOPPING
     METRIC_KEYS = {
         "classif": ["loss", "accuracy", "agreement"],
-        "regression": ["loss", "mse_m", "diversity_m", "mse_y", "diversity_y"],
+        "regression": ["loss", "mse", "diversity"],
     }
     def pack_metrics(values_tuple, keys):
         return dict(zip(keys, values_tuple))
@@ -107,22 +107,21 @@ if __name__ == "__main__":
     val_acc = 0.0
     
     if task_cat == 'classif':
-        naive_partial, naive_full = baseline_classif(
+        naive_partial_val, naive_full_val = baseline_classif(
             val_loader, 
             sensingmasks.global_known, 
             cfg.t, cfg.m
         )
-
-        print(f"Accuracy for naive prediction on val set with full information: {naive_full:.2f}")
-        print(f"Accuracy for naive prediction on val set with partial information: {naive_partial:.2f}")
+        print(f"Accuracy for naive prediction on val set with full information: {naive_full_val:.2f}")
+        print(f"Accuracy for naive prediction on val set with partial information: {naive_partial_val:.2f}")
     else:
-        naive_partial, naive_full = baseline_mse_m(
+        naive_partial_val, naive_full_val = baseline_mse_m(
             val_loader, 
             sensingmasks.global_known, 
             cfg.t, cfg.m
         )
-        print(f"MSE_m for naive prediction on val set with full information: {naive_full:.4f}")
-        print(f"MSE_m for naive prediction on val set with partial information: {naive_partial:.4f}")
+        print(f"MSE for naive prediction on val set with full information: {naive_full_val:.4f}")
+        print(f"MSE for naive prediction on val set with partial information: {naive_partial_val:.4f}")
 
     # PRINT TIME
     start = datetime.now()

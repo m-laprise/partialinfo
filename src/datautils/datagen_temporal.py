@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 from torch.utils.data import Dataset
 
@@ -319,7 +318,7 @@ class GTMatrices(Dataset):
         return self.generate_matrices(idx)
 
 
-class RandomLinearHead(nn.Module):
+""" class RandomLinearHead(nn.Module):
     @torch.no_grad()
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
@@ -334,7 +333,7 @@ class RandomLinearHead(nn.Module):
 
     def forward(self, x):
         return self.tanh(self.mlp(x) / 3.0) * 3.0
-    
+ """    
 
 class TemporalData(Dataset):
     """
@@ -349,11 +348,6 @@ class TemporalData(Dataset):
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
-        if self.task == 'nonlinear':
-            self.random_mlp = RandomLinearHead(self.m, 1)
-            self.random_mlp.eval()
-            for p in self.random_mlp.parameters():
-                p.requires_grad_(False)
         
         self.verbose = verbose
         self.stats = self.__summary()
@@ -361,34 +355,21 @@ class TemporalData(Dataset):
     def __len__(self):
         return self.data.shape[0]
     
-    def _mlp_apply(self, x: torch.Tensor) -> torch.Tensor:
-        return self.random_mlp(x)
-    
-    def _generate_ycol(self, matrix):
-        if matrix.ndimension() == 2:
-            matrix = matrix.unsqueeze(0)
-        with torch.no_grad():
-            vectorized_mlp = torch.func.vmap(self._mlp_apply)
-            y_column = vectorized_mlp(matrix).squeeze(0)
-        return y_column
-    
-    def _generate_label(self, matrix, y_column):
+    def _generate_label(self, matrix): 
         if self.task == 'argmax':
             # Label is the index of the maximum entry in the last row
             label = torch.argmax(matrix[-1, :])
         elif self.task == 'nonlinear':
-            # Label is the last row and the last element of y
-            last_row = matrix[-1, :]
-            label = torch.cat((last_row, y_column[-1]))
+            # Label is the last row 
+            label = matrix[-1, :]
         return label
 
     def __getitem__(self, idx: int):
         _, t, m = self.data.shape
         matrix = self.data[idx, :, :]
-        y_column = self._generate_ycol(matrix) if self.task == 'nonlinear' else None
         sample = {
             'matrix': matrix.view(1, t*m),
-            'label': self._generate_label(matrix, y_column)
+            'label': self._generate_label(matrix) 
         }
         
         return sample
@@ -409,20 +390,6 @@ class TemporalData(Dataset):
             print(f"Total entries: {self.t * self.m}")
             print("--------------------------")
         return { "nuclear_norms": nuc, "gaps": gap, "variances": var }
-
-
-def _compute_avg_overlap(masks: torch.Tensor) -> float:
-    assert len(masks.shape) == 2 and masks.shape[0] > 1, "masks must be [num_agents, total_entries] with num_agents > 1"
-    # (intersection / union) across all pairs of agents.
-    A, D = masks.shape
-    overlaps = []
-    for i in range(A):
-        for j in range(i + 1, A):
-            inter = (masks[i] * masks[j]).sum().item()
-            union = (masks[i] + masks[j]).clamp(0, 1).sum().item()
-            if union > 0:
-                overlaps.append(inter / union)
-    return float(np.mean(overlaps)) if overlaps else 0.0
 
 
 #=========#

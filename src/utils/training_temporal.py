@@ -55,24 +55,24 @@ def stacked_MSE(predictions: torch.Tensor,
                 targets: torch.Tensor,
                 reduction: str = 'mean') -> torch.Tensor:
     """
-    Computes MSE loss over stacked agent predictions of last row and outcome.
-    predictions: [B, A, m + y_dim]
-    targets: [B, m + y_dim]
+    Computes MSE loss over stacked agent predictions of last row.
+    predictions: [B, A, m]
+    targets: [B, m]
     
     Returns torch.Tensor: Scalar loss (if reduced) or tensor of shape [batch_size, A] (if 'none').
     """
     if predictions.dim() != 3:
-        raise ValueError(f"Expected logits with 3 dims [batch_size, n_agents, m + y_dim], got {predictions.shape}")
+        raise ValueError(f"Expected logits with 3 dims [batch_size, n_agents, m], got {predictions.shape}")
     if predictions.shape[-1] != targets.shape[-1]:
         raise ValueError("Mismatched predictions and targets, loss cannot be computed.")
     if targets.dim() != 2:
-        raise ValueError(f"Expected targets with 2 dims [batch_size, m + y_dim], got {targets.shape}")
+        raise ValueError(f"Expected targets with 2 dims [batch_size, m], got {targets.shape}")
     
-    B, A, m_y = predictions.shape # m_y = m + 1
+    B, A, m = predictions.shape # m = m + 1
     
     # Expand and reshape 
-    expanded_targets = targets.unsqueeze(1).expand(-1, A, -1).reshape(-1, m_y)  # [B * A, m + y_dim]
-    predictions_flat = predictions.reshape(-1, m_y)                             # [B * A, m + y_dim]
+    expanded_targets = targets.unsqueeze(1).expand(-1, A, -1).reshape(-1, m)  # [B * A, m + y_dim]
+    predictions_flat = predictions.reshape(-1, m)                             # [B * A, m + y_dim]
     # Compute per-prediction MSE loss
     losses = nn.MSELoss(reduction='none')(predictions_flat, expanded_targets)   # [B * A, m + y_dim]
 
@@ -218,10 +218,8 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         total_acc = 0.0
         total_agree = 0.0
     elif task == 'regression':
-        total_mse_m = 0.0
-        total_diversity_m = 0.0
-        total_mse_y = 0.0
-        total_diversity_y = 0.0
+        total_mse = 0.0
+        total_diversity = 0.0
     else:
         raise NotImplementedError(f"Task {task} not implemented")
 
@@ -247,14 +245,10 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
             total_acc += batch_acc
             total_agree += batch_agree
         else:
-            B, m_ydim = target.shape
-            m = m_ydim - 1
-            batch_mse_m, batch_diversity_m = regression_acc_agree(logits[:, :, :m], target[:, :m])
-            batch_mse_y, batch_diversity_y = regression_acc_agree(logits[:, :, -1], target[:, -1])
-            total_mse_m += batch_mse_m
-            total_diversity_m += batch_diversity_m
-            total_mse_y += batch_mse_y
-            total_diversity_y += batch_diversity_y
+            B, m = target.shape
+            batch_mse, batch_diversity = regression_acc_agree(logits, target)
+            total_mse += batch_mse
+            total_diversity += batch_diversity
 
     mean_loss = total_loss / max(total_examples, 1)
     if task == 'classif':
@@ -267,17 +261,13 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
             float(mean_agree)
         )
     else:
-        mean_mse_m = total_mse_m / max(total_examples, 1)
-        mean_diversity_m = total_diversity_m / max(total_examples, 1)
-        mean_mse_y = total_mse_y / max(total_examples, 1)
-        mean_diversity_y = total_diversity_y / max(total_examples, 1)
+        mean_mse = total_mse / max(total_examples, 1)
+        mean_diversity = total_diversity / max(total_examples, 1)
     
         return (
             float(mean_loss), 
-            float(mean_mse_m), 
-            float(mean_diversity_m),
-            float(mean_mse_y),
-            float(mean_diversity_y)
+            float(mean_mse), 
+            float(mean_diversity),
         )
 
 
@@ -412,18 +402,17 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, device, ta
         print(f"Accuracy for naive prediction on test set, full info: {naive_full:.2f}")
         print(f"Accuracy for naive prediction on test set, partial info: {naive_partial:.2f}")
     else:
-        test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = evaluate(   # type: ignore
+        test_loss, test_mse, test_diversity = evaluate(   # type: ignore
             model, aggregator, test_loader, criterion, device, task=task_cat
         )
-        test_stats = (test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y)
+        test_stats = (test_loss, test_mse, test_diversity)
         print("Test Set Performance | ",
-              f"Loss: {test_loss:.4f}, MSE_m: {test_mse_m:.4f}, Diversity_m: {test_diversity_m:.2f}, ",
-              f"MSE_y: {test_mse_y:.4f}, Diversity_y: {test_diversity_y:.2f}")
+              f"Loss: {test_loss:.4f}, MSE: {test_mse:.4f}, Diversity: {test_diversity:.2f}")
         
         naive_partial, naive_full = baseline_mse_m(
             test_loader, globalmask,
             cfg.t, cfg.m
         )
-        print(f"MSE_m for naive prediction on test set, full info: {naive_full:.4f}")
-        print(f"MSE_m for naive prediction on test set, partial info: {naive_partial:.4f}")
+        print(f"MSE for naive prediction on test set, full info: {naive_full:.4f}")
+        print(f"MSE for naive prediction on test set, partial info: {naive_partial:.4f}")
     return test_stats

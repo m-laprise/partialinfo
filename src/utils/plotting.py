@@ -101,20 +101,24 @@ def plot_regression(stats, filename_base):
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
     # Plot loss-related metrics in two panels
     fig, axs = plt.subplots(1, 2, figsize=(14, 5), dpi=120)
-    axs[0].plot(epochs, np.log(stats["train_loss"]), label="Train Loss", color='tab:blue')
-    axs[0].plot(epochs, np.log(stats["val_loss"]), label="Val Loss", color='tab:orange')
-    axs[0].set_title("Loss")
+    axs[0].plot(epochs, np.log(stats["train_loss"]), 
+                label="Train Loss (all agents)", color='tab:blue')
+    axs[0].plot(epochs, np.log(stats["val_loss"]), 
+                label="Val Loss (all agents)", color='tab:orange')
+    axs[0].plot(epochs, np.log(stats["val_mse"]), 
+                label="Val MSE (collective prediction)", color='tab:red', linestyle='--')
+    axs[0].set_title("Average of prediction error (training loss)\nand error of average prediction")
     axs[0].set_xlabel("Epoch")
-    axs[0].set_ylabel("Log MSE Loss")
+    axs[0].set_ylabel("Log MSE")
     axs[0].grid(True)
     axs[0].legend()
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    axs[1].plot(epochs, np.log(stats["val_mse_y"]), label="MSE on m")
-    axs[1].plot(epochs, np.log(stats["val_mse_m"]), label="MSE on y")
-    axs[1].set_title("Validation MSE")
+    axs[1].plot(epochs, stats["t_diversity"], label="Train Diversity", color='tab:blue')
+    axs[1].plot(epochs, stats["val_diversity"], label="Val Diversity", color='tab:orange')
+    axs[1].set_title("Diversity of prediction across agents")
     axs[1].set_xlabel("Epoch")
-    axs[1].set_ylabel("Log MSE")
+    axs[1].set_ylabel("Variance")
     axs[1].grid(True)
     axs[1].legend()
     axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))

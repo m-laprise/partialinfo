@@ -396,7 +396,7 @@ class CollectiveInferPredict(nn.Module):
         
         self.prenorm = nn.RMSNorm(self.agent_d_out)
         self.swish = nn.SiLU()
-        self.tanh = nn.Tanh()
+        #self.tanh = nn.Tanh()
         
         self.reset_parameters()  # initialize weights
     
@@ -427,7 +427,7 @@ class CollectiveInferPredict(nn.Module):
         #agent_m = torch.einsum('bam,amn->ban', agent_m, self.W_fwd_m) + self.b_fwd_m         # [B, A, m] 
         
         agent_y = torch.einsum('ban,any->bay', agent_m, self.W_predict) + self.b_predict # [B, A, y_dim]
-        agent_y = self.tanh(agent_y)
+        #agent_y = self.tanh(agent_y)
         
         return agent_y #torch.cat((agent_m, agent_y), dim=-1) # [B, A, m + y_dim]
     

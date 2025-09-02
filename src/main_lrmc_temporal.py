@@ -13,7 +13,6 @@ uv run ./src/main_lrmc_temporal.py \
 ```
 """
 
-import argparse
 import gc
 import os
 from dataclasses import asdict
@@ -30,6 +29,8 @@ from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_classif, plot_regression
 from utils.setup import create_data, setup_model
 from utils.training_temporal import (
+    baseline_classif,
+    baseline_mse_m,
     evaluate,
     final_test,
     stacked_cross_entropy_loss,
@@ -93,7 +94,7 @@ if __name__ == "__main__":
     # SET UP LOGGING, CHECKPOINTING, AND EARLY STOPPING
     METRIC_KEYS = {
         "classif": ["loss", "accuracy", "agreement"],
-        "regression": ["loss", "mse_m", "diversity_m", "mse_y", "diversity_y"],
+        "regression": ["loss", "mse", "diversity"],
     }
     def pack_metrics(values_tuple, keys):
         return dict(zip(keys, values_tuple))
@@ -104,6 +105,23 @@ if __name__ == "__main__":
     best = {"loss": float('inf'), "acc": float('-inf')}
     patience_counter = 0
     val_acc = 0.0
+    
+    if task_cat == 'classif':
+        naive_partial_val, naive_full_val = baseline_classif(
+            val_loader, 
+            sensingmasks.global_known, 
+            cfg.t, cfg.m
+        )
+        print(f"Accuracy for naive prediction on val set with full information: {naive_full_val:.2f}")
+        print(f"Accuracy for naive prediction on val set with partial information: {naive_partial_val:.2f}")
+    else:
+        naive_partial_val, naive_full_val = baseline_mse_m(
+            val_loader, 
+            sensingmasks.global_known, 
+            cfg.t, cfg.m
+        )
+        print(f"MSE for naive prediction on val set with full information: {naive_full_val:.4f}")
+        print(f"MSE for naive prediction on val set with partial information: {naive_partial_val:.4f}")
 
     # PRINT TIME
     start = datetime.now()
@@ -196,12 +214,13 @@ if __name__ == "__main__":
     # SAVE TRAINING CURVE PLOT
     if task_cat == 'classif':
         random_accuracy = 1.0 / cfg.m
-        plot_classif(stats, file_base, random_accuracy)
+        plot_classif(stats, file_base, random_accuracy, naive_full_val, naive_partial_val)
     else:
-        plot_regression(stats, file_base)
+        plot_regression(stats, file_base, naive_full_val, naive_partial_val)
     
     # EVALUATE ON TEST DATA
-    test_stats = final_test(model, aggregator, test_loader, criterion, device, task_cat)
+    test_stats = final_test(model, aggregator, test_loader, sensingmasks.global_known,
+                            criterion, device, task_cat, cfg)
 
     # SAVE LOGS
     log_training_run(

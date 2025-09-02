@@ -39,7 +39,7 @@ def init_stats(
       - "t_<metric>" and "val_<metric>" for every metric in the list
 
     Example:
-      METRIC_KEYS = {"classif": ["accuracy","agreement"], "regression": ["mse_m","diversity_m", ...]}
+      METRIC_KEYS = {"classif": ["accuracy","agreement"], "regression": ["mse","diversity", ...]}
       stats = init_stats("classif", METRIC_KEYS)
     """
     if isinstance(metric_keys, Mapping):
@@ -66,8 +66,8 @@ def printlog(task, epoch, stats, METRIC_KEYS):
               f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}")
     else:
         print(f"Ep {epoch:03d}. ",
-              f"Loss: {stats['train_loss'][-1]:.4f} | T var y: {stats['t_diversity_y'][-1]:.2f} || V loss: {stats['val_loss'][-1]:.4f} |",
-              f"V mse_m: {stats['val_mse_m'][-1]:.4f} | V mse_y: {stats['val_mse_y'][-1]:.4f} || V var m: {stats['val_diversity_m'][-1]:.2f} | V var y: {stats['val_diversity_y'][-1]:.2f}")
+              f"Loss: {stats['train_loss'][-1]:.4f} | T var: {stats['t_diversity'][-1]:.2f} || V loss: {stats['val_loss'][-1]:.4f} |",
+              f"V mse: {stats['val_mse'][-1]:.4f} | V var: {stats['val_diversity'][-1]:.2f}")
     pass
 
 
@@ -78,7 +78,7 @@ def log_training_run(
     if task_cat == 'classif':
         test_loss, test_accuracy, test_agreement = test_stats
     elif task_cat == 'regression':
-        test_loss, test_mse_m, test_diversity_m, test_mse_y, test_diversity_y = test_stats
+        test_loss, test_mse, test_diversity = test_stats
     else:
         raise NotImplementedError(f"Task {task_cat} not implemented.")
  
@@ -165,18 +165,16 @@ def log_training_run(
                 f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f}    | {vl:.2e} | {va:.2f}    | {vm:.2f}\n")
         
         else:
-            f.write(f"Final Test MSE_m: {test_mse_m:.2e}\n")
-            f.write(f"Final Test MSE_y: {test_mse_y:.2e}\n")
-            f.write(f"Final Test Diversity_m: {test_diversity_m:.2f}\n")
-            f.write(f"Final Test Diversity_y: {test_diversity_y:.2f}\n\n")
+            f.write(f"Final Test MSE: {test_mse:.2e}\n")
+            f.write(f"Final Test Diversity: {test_diversity:.2f}\n\n")
 
             f.write("Epoch Performance\n")
             f.write("-----------------\n")
-            f.write("Epoch | Train Loss | T var y | V loss | V mse_m | V mse_y | V var m | V var y\n")
-            f.write("------|------------|---------|--------|---------|---------|---------|---------\n")
-            for i, (tl, tvy, vl, vmm, vmy, vvm, vvy) in enumerate(zip(stats["train_loss"], stats["t_diversity_y"],
-                                                    stats["val_loss"], stats["val_mse_m"], stats["val_mse_y"],
-                                                    stats["val_diversity_m"], stats["val_diversity_y"]), 1):
-                f.write(f"{i:5d} | {tl:.2e}   | {tvy:.2f}    | {vl:.2e} | {vmm:.2e} | {vmy:.2e} | {vvm:.2f} | {vvy:.2f}\n")
+            f.write("Epoch | Train Loss | V loss   | V mse    | V var   \n")
+            f.write("------|------------|----------|----------|---------\n")
+            for i, (tl, vl, vmm, vvm) in enumerate(
+                zip(stats["train_loss"], stats["val_loss"], stats["val_mse"], stats["val_diversity"]), 1
+            ):
+                f.write(f"{i:5d} | {tl:.2e}   | {vl:.2e} | {vmm:.2e} | {vvm:.4f}\n")
 
     print(f"Training log saved to: {log_file}")

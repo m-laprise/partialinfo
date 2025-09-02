@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from datagen_temporal import SensingMasks
+from datautils.sensing import SensingMasks
 
 
 class DotGATHead(nn.Module):
@@ -140,7 +140,6 @@ class TrainableSmallWorld(nn.Module):
         learn_mask = torch.ones(A, A, dtype=torch.bool, device=device)
         learn_mask[frozen_idx[:, 0], frozen_idx[:, 1]] = False
         if symmetric:
-            # out-of-place logical-and avoids aliasing error
             learn_mask = learn_mask & learn_mask.T
         # list learnable parameters
         learnable_idx = learn_mask.nonzero(as_tuple=False)
@@ -381,7 +380,7 @@ class CollectiveInferPredict(nn.Module):
         self.n_agents = num_agents
         self.agent_d_out = agent_outputs_dim
         self.m = m
-        self.y_dim = y_dim
+        self.y_dim = m #y_dim
         
         self.W_fwd_H = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.agent_d_out))
         self.b_fwd_H = nn.Parameter(torch.zeros(self.n_agents, self.agent_d_out))
@@ -389,15 +388,15 @@ class CollectiveInferPredict(nn.Module):
         self.W_decode = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.m))
         self.b_decode = nn.Parameter(torch.zeros(self.n_agents, self.m))
         
-        self.W_fwd_m = nn.Parameter(torch.empty(self.n_agents, self.m, self.m))
-        self.b_fwd_m = nn.Parameter(torch.zeros(self.n_agents, self.m))
+        #self.W_fwd_m = nn.Parameter(torch.empty(self.n_agents, self.m, self.m))
+        #self.b_fwd_m = nn.Parameter(torch.zeros(self.n_agents, self.m))
         
         self.W_predict = nn.Parameter(torch.empty(self.n_agents, self.m, self.y_dim))
         self.b_predict = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
         
         self.prenorm = nn.RMSNorm(self.agent_d_out)
         self.swish = nn.SiLU()
-        self.tanh = nn.Tanh()
+        #self.tanh = nn.Tanh()
         
         self.reset_parameters()  # initialize weights
     
@@ -406,7 +405,7 @@ class CollectiveInferPredict(nn.Module):
             for i in range(self.W_decode.size(0)):
                 nn.init.xavier_uniform_(self.W_fwd_H[i])
                 nn.init.xavier_uniform_(self.W_decode[i])
-                nn.init.xavier_uniform_(self.W_fwd_m[i])
+                #nn.init.xavier_uniform_(self.W_fwd_m[i])
                 nn.init.xavier_uniform_(self.W_predict[i])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -425,10 +424,10 @@ class CollectiveInferPredict(nn.Module):
         
         agent_m = torch.einsum('bah,ahm->bam', x, self.W_decode) + self.b_decode # [B, A, m] 
         agent_m = self.swish(agent_m)
-        agent_m = torch.einsum('bam,amn->ban', agent_m, self.W_fwd_m) + self.b_fwd_m         # [B, A, m] 
+        #agent_m = torch.einsum('bam,amn->ban', agent_m, self.W_fwd_m) + self.b_fwd_m         # [B, A, m] 
         
         agent_y = torch.einsum('ban,any->bay', agent_m, self.W_predict) + self.b_predict # [B, A, y_dim]
-        agent_y = self.tanh(agent_y)
+        #agent_y = self.tanh(agent_y)
         
-        return torch.cat((agent_m, agent_y), dim=-1) # [B, A, m + y_dim]
+        return agent_y #torch.cat((agent_m, agent_y), dim=-1) # [B, A, m + y_dim]
     

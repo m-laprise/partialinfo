@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 from torch.utils.data import Dataset
 
@@ -322,22 +321,22 @@ class GTMatrices(Dataset):
         return self.generate_matrices(idx)
 
 
-class RandomLinearHead(nn.Module):
+""" class RandomLinearHead(nn.Module):
     @torch.no_grad()
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.mlp = nn.Sequential(
-            nn.Linear(self.in_dim, 2*self.in_dim, bias=True),
+            nn.Linear(self.in_dim, 2 * self.in_dim, bias=True),
             nn.SiLU(),
-            nn.Linear(2*self.in_dim, self.out_dim, bias=False)
+            nn.Linear(2 * self.in_dim, self.out_dim, bias=False)
         ) 
         self.tanh = nn.Tanh()
 
     def forward(self, x):
-        return self.tanh(self.mlp(x))
-    
+        return self.tanh(self.mlp(x) / 3.0) * 3.0
+ """    
 
 class TemporalData(Dataset):
     """
@@ -354,6 +353,7 @@ class TemporalData(Dataset):
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
+<<<<<<< HEAD:src/datagen_temporal.py
         self.target_source = target_source  # 'observed' | 'factors'
         if self.task.startswith('nonlinear'):
             in_dim = self.r if self.target_source == 'factors' else self.m
@@ -361,6 +361,8 @@ class TemporalData(Dataset):
             self.random_mlp.eval()
             for p in self.random_mlp.parameters():
                 p.requires_grad_(False)
+=======
+>>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         
         self.verbose = verbose
         self.stats = self.__summary()
@@ -368,6 +370,7 @@ class TemporalData(Dataset):
     def __len__(self):
         return self.data.shape[0]
     
+<<<<<<< HEAD:src/datagen_temporal.py
     def _mlp_apply(self, x: torch.Tensor) -> torch.Tensor:
         return self.random_mlp(x)
     
@@ -381,25 +384,36 @@ class TemporalData(Dataset):
             return self._mlp_apply(xin)
     
     def _generate_label(self, matrix, y_column):
+=======
+    def _generate_label(self, matrix): 
+>>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         if self.task == 'argmax':
             # Label is the index of the maximum entry in the last row
             label = torch.argmax(matrix[-1, :])
         elif self.task == 'nonlinear':
+<<<<<<< HEAD:src/datagen_temporal.py
             # Label is the last row and the last element of y
             last_row = matrix[-1, :]
             label = torch.cat((last_row, y_column[-1]))
         elif self.task == 'nonlinear_seq':
             # Label is the full time series of y
             label = y_column.view(-1)
+=======
+            # Label is the last row 
+            label = matrix[-1, :]
+>>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         return label
 
     def __getitem__(self, idx: int):
         _, t, m = self.data.shape
         matrix = self.data[idx, :, :]
+<<<<<<< HEAD:src/datagen_temporal.py
         y_column = self._generate_ycol(idx, matrix) if self.task.startswith('nonlinear') else None
+=======
+>>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         sample = {
             'matrix': matrix.view(1, t*m),
-            'label': self._generate_label(matrix, y_column)
+            'label': self._generate_label(matrix) 
         }
         return sample
     
@@ -421,6 +435,7 @@ class TemporalData(Dataset):
         return { "nuclear_norms": nuc, "gaps": gap, "variances": var }
 
 
+<<<<<<< HEAD:src/datagen_temporal.py
 def _compute_avg_overlap(masks: torch.Tensor) -> float:
     assert len(masks.shape) == 2 and masks.shape[0] > 1, "masks must be [num_agents, total_entries] with num_agents > 1"
     # (intersection / union) across all pairs of agents.
@@ -593,6 +608,8 @@ class SensingMasks(object):
         print("--------------------------")
 
 
+=======
+>>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
 #=========#
 """
 NUM_MATRICES = 20

@@ -296,3 +296,117 @@ def _compute_pairwise_overlaps(masks: torch.Tensor):
             else:
                 overlaps.append(0.0)
     return overlaps
+
+
+class SensingMasksTemporal(object):
+    """
+    Column-wise sensing for temporal matrices.
+
+    Each agent observes a random fraction rho of the m columns of a t x m matrix.
+    Application semantics:
+      - Input X can be a flattened single matrix [1, D] with D = t*m, or a batched
+        collection [B, 1, D].
+      - This mask zeros out entire columns per agent.
+      - Returns masked tensors with shapes [A, t, m] (single) or [B, A, t, m] (batched).
+
+    Args:
+        TemporalData: dataset providing .t and .m attributes.
+        num_agents: number of agents A.
+        rho: fraction of columns per agent to keep (0.0 to 1.0).
+        seed: optional torch RNG seed (for reproducible column choices).
+    """
+    def __init__(self, TemporalData, num_agents: int, rho: float, *, seed: int | None = None):
+        assert 0.0 <= rho <= 1.0, "rho must be in [0, 1]"
+        self.t, self.m = int(TemporalData.t), int(TemporalData.m)
+        self.num_agents = int(num_agents)
+        self.rho = float(rho)
+        self.total_entries = self.t * self.m
+        if seed is not None:
+            torch.manual_seed(int(seed))
+        # Build per-agent column masks: [A, m]
+        k = int(round(self.rho * self.m))
+        k = max(min(k, self.m), 0)  # clamp to [0, m]
+        masks = torch.zeros((self.num_agents, self.m), dtype=torch.bool)
+        if k > 0:
+            for a in range(self.num_agents):
+                cols = torch.randperm(self.m)[:k]
+                masks[a, cols] = True
+        self.col_masks = masks  # [A, m], True where observed
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        assert 0 <= idx < self.num_agents, f"Agent index {idx} out of range"
+        return self.col_masks[idx]
+
+    def __call__(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        Apply agent-specific column masks to input matrices.
+
+        Accepts:
+          - [1, D] with D = t*m  -> returns [A, t, m]
+          - [B, 1, D]           -> returns [B, A, t, m]
+          - [t, m]              -> returns [A, t, m]
+          - [B, t, m]           -> returns [B, A, t, m]
+        """
+        device = X.device
+        t, m, A = self.t, self.m, self.num_agents
+        D = t * m
+        col_masks = self.col_masks.to(device=device)
+
+        if X.dim() == 2 and X.shape[0] == 1 and X.shape[1] == D:
+            # [1, D] -> [A, t, m]
+            X_tm = X.view(1, t, m)
+            X_A_tm = X_tm.repeat(A, 1, 1)
+            return X_A_tm * col_masks[:, None, :]
+        elif X.dim() == 3 and X.shape[0] >= 1 and X.shape[1] == 1 and X.shape[2] == D:
+            # [B, 1, D] -> [B, A, t, m]
+            B = X.shape[0]
+            X_B_tm = X.view(B, 1, t, m)
+            X_BA_tm = X_B_tm.repeat(1, A, 1, 1)
+            return X_BA_tm * col_masks[None, :, None, :]
+        elif X.dim() == 2 and X.shape == (t, m):
+            # [t, m] -> [A, t, m]
+            X_tm = X.unsqueeze(0)
+            X_A_tm = X_tm.repeat(A, 1, 1)
+            return X_A_tm * col_masks[:, None, :]
+        elif X.dim() == 3 and X.shape[1:] == (t, m):
+            # [B, t, m] -> [B, A, t, m]
+            B = X.shape[0]
+            X_B_tm = X.unsqueeze(1)  # [B, 1, t, m]
+            X_BA_tm = X_B_tm.repeat(1, A, 1, 1)
+            return X_BA_tm * col_masks[None, :, None, :]
+        else:
+            raise ValueError(f"Unexpected input shape {tuple(X.shape)}; expected [1,D], [B,1,D], [t,m], or [B,t,m] with D=t*m")
+
+
+# ========= Sample usage (commented) =========
+"""
+from datautils.datagen_temporal import GTMatrices, TemporalData
+import matplotlib.pyplot as plt
+import torch
+
+# Parameters
+NUM_MATRICES = 1
+T = 50
+M = 25
+A = 4
+R = 10
+RHO = 0.3  # fraction of columns each agent observes
+
+with torch.no_grad():
+    gt = GTMatrices(N=NUM_MATRICES, t=T, m=M, r=R)
+    td = TemporalData(gt)
+    smt = SensingMasksTemporal(td, num_agents=A, rho=RHO, seed=42)
+
+    sample = td[0]['matrix']          # [1, T*M]
+    masked = smt(sample)              # [A, T, M]
+
+    fig, axs = plt.subplots(1, A + 1, figsize=(3*(A+1), 4))
+    axs[0].imshow(sample.view(T, M))
+    axs[0].set_title('Ground Truth')
+    axs[0].set_xticks([]); axs[0].set_yticks([])
+    for a in range(A):
+        axs[a+1].imshow(masked[a])
+        axs[a+1].set_title(f'Agent {a} (rho={RHO})')
+        axs[a+1].set_xticks([]); axs[a+1].set_yticks([])
+    plt.tight_layout(); plt.show()
+"""

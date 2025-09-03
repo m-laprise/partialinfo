@@ -353,16 +353,6 @@ class TemporalData(Dataset):
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
-<<<<<<< HEAD:src/datagen_temporal.py
-        self.target_source = target_source  # 'observed' | 'factors'
-        if self.task.startswith('nonlinear'):
-            in_dim = self.r if self.target_source == 'factors' else self.m
-            self.random_mlp = RandomLinearHead(in_dim, 1)
-            self.random_mlp.eval()
-            for p in self.random_mlp.parameters():
-                p.requires_grad_(False)
-=======
->>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         
         self.verbose = verbose
         self.stats = self.__summary()
@@ -370,47 +360,18 @@ class TemporalData(Dataset):
     def __len__(self):
         return self.data.shape[0]
     
-<<<<<<< HEAD:src/datagen_temporal.py
-    def _mlp_apply(self, x: torch.Tensor) -> torch.Tensor:
-        return self.random_mlp(x)
-    
-    def _generate_ycol(self, idx: int, matrix: torch.Tensor):
-        # Build targets from observed features or latent factors
-        with torch.no_grad():
-            if self.target_source == 'factors':
-                xin = self.gt.U[idx]
-            else:
-                xin = matrix
-            return self._mlp_apply(xin)
-    
-    def _generate_label(self, matrix, y_column):
-=======
     def _generate_label(self, matrix): 
->>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         if self.task == 'argmax':
             # Label is the index of the maximum entry in the last row
             label = torch.argmax(matrix[-1, :])
         elif self.task == 'nonlinear':
-<<<<<<< HEAD:src/datagen_temporal.py
-            # Label is the last row and the last element of y
-            last_row = matrix[-1, :]
-            label = torch.cat((last_row, y_column[-1]))
-        elif self.task == 'nonlinear_seq':
-            # Label is the full time series of y
-            label = y_column.view(-1)
-=======
             # Label is the last row 
             label = matrix[-1, :]
->>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         return label
 
     def __getitem__(self, idx: int):
         _, t, m = self.data.shape
         matrix = self.data[idx, :, :]
-<<<<<<< HEAD:src/datagen_temporal.py
-        y_column = self._generate_ycol(idx, matrix) if self.task.startswith('nonlinear') else None
-=======
->>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
         sample = {
             'matrix': matrix.view(1, t*m),
             'label': self._generate_label(matrix) 
@@ -434,182 +395,6 @@ class TemporalData(Dataset):
             print("--------------------------")
         return { "nuclear_norms": nuc, "gaps": gap, "variances": var }
 
-
-<<<<<<< HEAD:src/datagen_temporal.py
-def _compute_avg_overlap(masks: torch.Tensor) -> float:
-    assert len(masks.shape) == 2 and masks.shape[0] > 1, "masks must be [num_agents, total_entries] with num_agents > 1"
-    # (intersection / union) across all pairs of agents.
-    A, D = masks.shape
-    overlaps = []
-    for i in range(A):
-        for j in range(i + 1, A):
-            inter = (masks[i] & masks[j]).sum().item()
-            union = (masks[i] | masks[j]).sum().item()
-            if union > 0:
-                overlaps.append(inter / union)
-    return float(np.mean(overlaps)) if overlaps else 0.0
-
-class SensingMasks(object):
-    """
-    Class to generate boolean sensing masks for all agents, and a boolean global mask for 
-    backpropagation to train only on entries known by at least one agent.
-
-    Args:
-        TemporalData (torch.utils.data.Dataset): Dataset of ground truth matrices.
-        rank (int): Rank of the matrices.
-        num_agents (int): Number of agents.
-        density (float): Target density of global known entries.
-        
-    Attributes:
-        num_matrices (int): Number of matrices in the dataset.
-        num_agents (int): Number of agents.
-        density (float): Target density of global known entries.
-        t (int): Time dimension of the matrices.
-        m (int): Feature dimension of the matrices.
-        r (int): Rank of the matrices.
-        total_entries (int): Total number of entries in the matrices.
-        stats (dict): Statistics about the generated masks.
-        masks (torch.Tensor): Boolean masks for each agent.
-        global_known (torch.Tensor): Boolean mask for global known entries.
-    
-    Methods:
-        __init__(): Initialize object of class SensingMasks.
-        __call__(torch.Tensor, global_mask: bool): Apply local or global masks to a tensor.
-        __getitem__(int): Index a specific agent's mask. -1 returns the global mask.
-        _generate(): Generate masks for SensingMasks initialization.
-        _sample_global_known_idx(): Sample indices of global known entries.
-        _robust_sample_global_known_idx(): Robustly sample indices of global known entries.
-        _agent_samplesizes(): Draw sample sizes for each agent.
-        _build_agent_masks(): Build masks for each agent.
-        _summary(): Print summary of the generated masks.
-    """
-    def __init__(self, TemporalData, rank, num_agents, density, *, future_only: bool = True):
-        self.num_matrices = len(TemporalData)
-        self.num_agents = num_agents
-        self.density = density
-        self.t, self.m = TemporalData.t, TemporalData.m
-        self.r = rank
-        self.total_entries = self.t * self.m
-        self.stats = {
-            "agent_overlap": [], "agent_endowments": [],
-            "actual_knowns": [], "oversample_flags": 0
-        }
-        self.future_only = future_only
-        self.masks, self.global_known = self._generate()
-        
-    def __getitem__(self, idx):
-        assert -1 <= idx < self.num_agents, f"Agent index {idx} is out of range"
-        return self.masks[idx, :] if idx != -1 else self.global_known
-    
-    def __call__(self, X: torch.Tensor, global_mask: bool = False):
-        if global_mask:
-            global_known = self.global_known[None,...]
-            assert X.shape == global_known.shape
-            return X * global_known
-        else:
-            if len(X.shape) == 2:
-                if X.shape[0] == self.num_agents:
-                    assert X.shape[1] == self.total_entries
-                    return X * self.masks
-                elif X.shape[0] == 1 and X.shape[1] == self.total_entries:
-                    # create stacked vectors of Xs, so result is num_agents x total_entries,
-                    # then apply masks
-                    return X.repeat(self.num_agents, 1) * self.masks
-            elif len(X.shape) == 3:
-                # Batched implementation
-                assert X.shape[1] == 1
-                assert X.shape[2] == self.total_entries
-                batch_size = X.shape[0]
-                return X * self.masks[None,...].repeat(batch_size, 1, 1) 
-            else:
-                raise ValueError(f"X is of unexpected shape {X.shape}")
-        
-    def _generate(self):
-        global_known_idx = self._robust_sample_global_known_idx()
-        masks, samplesizes, oversampled = self._build_agent_masks(global_known_idx)
-        global_actual_known = masks.sum(dim = 0) > 0
-
-        self.stats["agent_endowments"] = samplesizes
-        self.stats["oversample_flags"] = oversampled
-        self.stats["actual_knowns"] = global_actual_known.sum()
-        self.__summary(masks)
-        
-        return masks, global_actual_known
-
-    def _sample_global_known_idx(self):
-        global_known_count = max(int(self.density * self.total_entries), 1)
-        all_indices = torch.randperm(self.total_entries)
-        global_known_indices = all_indices[:global_known_count]
-        global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
-        global_mask[global_known_indices] = True
-        if self.future_only:
-            # Hide the entire last row
-            global_mask[-self.m:] = False
-            keep = global_known_indices < self.total_entries - self.m
-            global_known_indices = global_known_indices[keep]
-        return global_mask, global_known_indices
-
-    def _robust_sample_global_known_idx(self, max_attempts: int = 20, verbose: bool = True):
-        if self.r <= min(self.m, self.t) // 2:
-            for attempt in range(1, max_attempts + 1):
-                global_mask, global_known_idx = self._sample_global_known_idx()
-                mask_2d = global_mask.view(self.t, self.m)
-                rows_ok = (mask_2d[:-1, :].sum(dim=1) >= self.r).all()
-                cols_ok = (mask_2d.sum(dim=0) >= self.r).all()
-                if rows_ok and cols_ok:
-                    return global_known_idx
-                if verbose and attempt < max_attempts:
-                    print(f"Warning: Retrying sampling (attempt {attempt}) due to sparse rows/cols.")
-            raise RuntimeError(
-                f"Failed to sample a valid mask after {max_attempts} attempts. "
-                f"Could not ensure at least {self.r} known entries in each row and column. "
-                f"Density: {self.density}, size: {self.t}x{self.m}"
-            )
-        else:
-            _, global_known_idx = self._sample_global_known_idx()
-            print("Warning: matrices are not low-rank. r is high compared to t or m.")
-            return global_known_idx
-            
-    def _agent_samplesizes(self, num_global_known: int):
-        base = max(1, num_global_known // self.num_agents)
-        low = min(int(2.0 * base), num_global_known)
-        high = min(int(4.0 * base), num_global_known)
-        if high > low:
-            attempted = torch.randint(low, high, (self.num_agents,), dtype=torch.int64)
-        else:
-            attempted = torch.full((self.num_agents,), low, dtype=torch.int64)
-        oversampled = int((attempted > num_global_known).sum().item())
-        samplesizes = torch.minimum(attempted, torch.tensor(num_global_known, dtype=torch.int64))
-        return samplesizes, oversampled
-    
-    def _build_agent_masks(self, global_known_idx):
-        num_global_known = len(global_known_idx)
-        masks = torch.zeros((self.num_agents, self.total_entries), dtype=torch.bool)
-        samplesizes, oversampled_total = self._agent_samplesizes(num_global_known)
-        for i in range(self.num_agents):
-            # Randomly choose a subset (without replacement) of the global known indices
-            perm = torch.randperm(num_global_known, device=global_known_idx.device)[: int(samplesizes[i].item())]
-            sample_idx = global_known_idx[perm]
-            masks[i, sample_idx] = True
-            
-        return masks, samplesizes, oversampled_total  
-
-    def __summary(self, masks):
-        self.stats["agent_overlap"] = _compute_avg_overlap(masks) if self.num_agents > 1 else -np.inf
-        endowment_mean = np.mean(self.stats["agent_endowments"].tolist()) 
-        actual_known_mean = np.mean(self.stats["actual_knowns"].tolist())
-        print("--------------------------")
-        print(f"Target density: {self.density:.2f}.")
-        print(f"Target known entries: {self.total_entries * self.density:.1f}, Mean known entries: {actual_known_mean:.1f}")
-        print(f"{self.num_agents} agents, Avg overlap: {self.stats['agent_overlap']:.3f}")
-        print(f"Avg entries per agent: {endowment_mean:.1f}")
-        if self.stats["oversample_flags"] > 0:
-            print(f"WARNING ⚠️  {self.stats['oversample_flags']} matrices had agents sampling all known entries.")
-        print("--------------------------")
-
-
-=======
->>>>>>> eca3c7dbec1b8550c04213ab6aa6cefc097fc781:src/datautils/datagen_temporal.py
 #=========#
 """
 NUM_MATRICES = 20

@@ -76,20 +76,32 @@ class SensingMasks(object):
         future_only (bool): hide the last row from the global_known set (same semantics as before).
         rho (float): overlap-control hyperparameter (default 0.0).
         gamma (float): inequality-control hyperparameter (default 0.0).
+        gamma_curve (float): controls the mapping of gamma to a Dirichlet alpha.
+        ndim (int): if 2, the input is a t x m vectorized matrix. if 1, the input is a matrix row
+                    of length m (default 2).
     """
     def __init__(self, TemporalData, rank, num_agents, density, *,
-                 future_only: bool = True, 
+                 hide_future: bool = True, 
                  rho: float = 0.0, gamma: float = 0.0, gamma_curve: float = 1.2,
+                 ndim: int = 2,
                  verbose: bool = True):
         assert 0.0 <= rho <= 1.0, "rho must be in [0,1]"
         assert 0.0 <= gamma <= 1.0, "gamma must be in [0,1]"
+        if ndim > 2:
+            raise NotImplementedError("Masks must be for a 1D or 2D tensor.")
 
         self.num_matrices = len(TemporalData)
         self.num_agents = num_agents
         self.density = density
-        self.t, self.m = TemporalData.t, TemporalData.m
+        self.ndim = ndim
+        if self.ndim == 2:
+            self.t, self.m = TemporalData.t, TemporalData.m
+            self.total_entries = self.t * self.m
+        else:
+            self.t, self.m = 1, TemporalData.m
+            self.total_entries = self.m
+            
         self.r = rank
-        self.total_entries = self.t * self.m
         self.verbose = verbose
         self.stats = {
             "agent_overlap": None,
@@ -99,7 +111,7 @@ class SensingMasks(object):
             "oversample_flags": 0,
             "fraction_clipped": 0.0
         }
-        self.future_only = future_only
+        self.hide_future = hide_future
 
         self.rho = float(rho)
         self.gamma = float(gamma)
@@ -152,7 +164,7 @@ class SensingMasks(object):
         global_known_indices = all_indices[:global_known_count]
         global_mask = torch.zeros(self.total_entries, dtype=torch.bool)
         global_mask[global_known_indices] = True
-        if self.future_only:
+        if self.hide_future and self.t > 1:
             # Hide the entire last row
             global_mask[-self.m:] = False
             keep = global_known_indices < self.total_entries - self.m
@@ -160,7 +172,7 @@ class SensingMasks(object):
         return global_mask, global_known_indices
 
     def _robust_sample_global_known_idx(self, max_attempts: int = 20):
-        if self.r <= min(self.m, self.t) // 2:
+        if self.r <= min(self.m, self.t) // 2 and self.t > 1:
             for attempt in range(1, max_attempts + 1):
                 global_mask, global_known_idx = self._sample_global_known_idx()
                 mask_2d = global_mask.view(self.t, self.m)
@@ -177,8 +189,12 @@ class SensingMasks(object):
             )
         else:
             _, global_known_idx = self._sample_global_known_idx()
+            unseen = self.m - global_known_idx.shape[0]
             if self.verbose:
-                print("Warning: matrices are not low-rank. r is high compared to t or m.")
+                if self.t > 1:
+                    print("Warning: matrices are not low-rank. r is high compared to t or m.")
+                elif self.t == 1:
+                    print(f"Warning: {unseen} columns cannot be sampled from and will remain secret.")
             return global_known_idx
 
     def _agent_samplesizes(self, num_global_known: int):
@@ -267,7 +283,6 @@ class SensingMasks(object):
 
         endowment_vec = self.stats["agent_endowments"].float() if isinstance(self.stats["agent_endowments"], torch.Tensor) else torch.tensor(self.stats["agent_endowments"])
         endowment_mean = float(torch.mean(endowment_vec).item()) if endowment_vec.numel() > 0 else 0.0
-
         actual_known_mean = float(self.stats["actual_knowns"])  # union size
 
         print("--------------------------")

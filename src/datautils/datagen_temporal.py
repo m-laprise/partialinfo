@@ -254,6 +254,7 @@ class GTMatrices(Dataset):
                  mode: str = 'value',
                  kernel: str = 'matern',
                  vtype: str = 'random',
+                 U_only: bool = False,
                  seed: Optional[int] = None,
                  **kernel_kwargs):
         assert N % realizations == 0
@@ -265,7 +266,13 @@ class GTMatrices(Dataset):
         self.vtype = vtype
         self.N = N
         self.num_dgps = N // realizations
-        self.t, self.m, self.r = t, m, r 
+        self.U_only = U_only
+        if self.U_only:
+            if r < m:
+                print(f"WARNING: U_only option is activated but rank {r} was requested.",
+                    "Full rank matrices will be returned.")
+                r = m
+        self.t, self.m, self.r = t, m, r
         self.structured = structured
         self.realizations = realizations
         #self.sigma = sigma
@@ -300,6 +307,8 @@ class GTMatrices(Dataset):
         return Us, Vs, vcovsUs
 
     def generate_matrices(self, idx = None):
+        if self.U_only:
+            return self.U[idx]
         idx = np.arange(self.U.shape[0]) if idx is None else idx
         M = torch.einsum('...ij,...kj->...ik', self.U[idx], self.V[idx])
         #M += self.sigma * torch.randn(M.shape, dtype=torch.float32)

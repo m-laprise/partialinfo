@@ -1,6 +1,7 @@
 
 from typing import Dict, List, Optional, Tuple
 
+import math
 import numpy as np
 import torch
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
@@ -226,10 +227,24 @@ def _gen_U_col(vcovU: torch.Tensor, *, offset: float) -> torch.Tensor:
 @torch.no_grad()
 def _generate_U(vcovsU: torch.Tensor, *, offset: float = 0.0):
     r, t, _ = vcovsU.shape
-    # Batched multivariate normal for all r columns at once
+    # Build a robust Cholesky with adaptive jitter to ensure PD
+    def _stable_cholesky(S: torch.Tensor, init_jitter: float = 1e-6, max_tries: int = 7) -> torch.Tensor:
+        I = torch.eye(S.size(-1), dtype=S.dtype, device=S.device)
+        jitter = init_jitter
+        for _ in range(max_tries):
+            try:
+                return torch.linalg.cholesky(S + jitter * I)
+            except RuntimeError:
+                jitter *= 10.0
+        # Last resort: symmetrize and add strong jitter
+        S_sym = 0.5 * (S + S.transpose(-1, -2))
+        return torch.linalg.cholesky(S_sym + jitter * I)
+
+    scale_tril = _stable_cholesky(vcovsU)
+    # Batched multivariate normal using scale_tril (more numerically stable)
     mvn = torch.distributions.MultivariateNormal(
         loc=torch.full((r, t), offset, dtype=vcovsU.dtype, device=vcovsU.device),
-        covariance_matrix=vcovsU,
+        scale_tril=scale_tril,
     )
     U_rt = mvn.rsample()  # shape: (r, t)
     return U_rt.T  # shape: (t, r)
@@ -352,9 +367,9 @@ class TemporalData(Dataset):
     Takes ground truth matrices and a task statement, and generates labeled data that can
     be provided to a DataLoader.
     """
-    def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, target_source: str = 'observed', verbose=True):
+    def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, target_source: str = 'observed', verbose=True, rho_out: float = 0.4):
         super().__init__()
-        if task not in ['argmax', 'nonlinear', 'nonlinear_seq']:
+        if task not in ['argmax', 'nonlinear', 'nonlinear_seq', 'nonlin_function']:
             raise NotImplementedError(f"Task {task} not implemented")
         
         # Keep a reference to GT to optionally build targets from latent factors
@@ -362,6 +377,19 @@ class TemporalData(Dataset):
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
+        self.u_only = bool(getattr(matrices, 'U_only', False))
+        self.rho_out = float(rho_out)
+        # Setup for nonlin_function task: fixed random weights over all columns (size m)
+        if self.task == 'nonlin_function':
+            self.W_out = torch.randn(self.m, dtype=torch.get_default_dtype())
+            # Build a fixed per-row selection mask with fraction rho_out of columns
+            k = int(round(self.rho_out * self.m))
+            k = max(1, min(k, self.m))
+            sel_mask = torch.zeros(self.t, self.m, dtype=torch.bool)
+            for r_ in range(self.t):
+                cols = torch.randperm(self.m)[:k]
+                sel_mask[r_, cols] = True
+            self._row_sel_mask = sel_mask
         
         self.verbose = verbose
         self.stats = self.__summary()
@@ -376,6 +404,55 @@ class TemporalData(Dataset):
         elif self.task == 'nonlinear':
             # Label is the last row 
             label = matrix[-1, :]
+        elif self.task == 'nonlin_function':
+            # Produce a time series label y ∈ R^{T×1} with one-step shift:
+            # y[t] = tanh(W_out · matrix[t-1, :]) for t >= 1, and y[0] = 0.
+            t, m = matrix.shape
+            y = torch.zeros(t, dtype=matrix.dtype, device=matrix.device)
+            if t > 1:
+                prev_rows = matrix[:-1, :]          # [T-1, M]
+                # Apply per-row selection mask on previous rows
+                row_mask = self._row_sel_mask[:-1, :].to(device=matrix.device)
+                prev_rows_masked = prev_rows * row_mask.to(dtype=prev_rows.dtype)
+                w = self.W_out.to(device=matrix.device, dtype=prev_rows.dtype)
+                # weighted sum across selected columns -> [T-1]
+                z = prev_rows_masked @ w
+                # Center and normalize z to unit variance to control tanh saturation
+                z = z - z.mean()
+                z_std = z.std()
+                if torch.isfinite(z_std) and z_std > 0:
+                    z_norm = z / (z_std + 1e-8)
+                    # Find a gain g such that Var[tanh(g * z_norm)] ≈ target_var
+                    # Note: due to tanh bounds, variance cannot exceed 1.
+                    target_var = 0.9  # "close to 1" without hard saturation
+                    # Bisection over g in [g_low, g_high]
+                    g_low, g_high = 0.1, 10.0
+                    def tanh_var(g: float) -> float:
+                        return torch.tanh(g * z_norm).var(unbiased=False).item()
+                    v_low = tanh_var(g_low)
+                    v_high = tanh_var(g_high)
+                    # Ensure target is within reachable range; adjust if necessary
+                    target = min(max(target_var, v_low), v_high)
+                    g = g_high
+                    # Quick bisection (fixed iters)
+                    for _ in range(12):
+                        g_mid = 0.5 * (g_low + g_high)
+                        v_mid = tanh_var(g_mid)
+                        if v_mid < target:
+                            g_low = g_mid
+                        else:
+                            g_high = g_mid
+                        g = g_mid
+                    # Reduce preactivations to avoid saturation: halve the effective gain
+                    eff = (g * z_norm) / 2.0
+                    # Also normalize by number of selected columns per row: 1/sqrt(m*rho_out*5)
+                    k_sel = max(1, int(round(self.rho_out * self.m)))
+                    col_scale = 1.0 / math.sqrt(k_sel * 2.0)
+                    y[1:] = torch.tanh(eff * col_scale)
+                else:
+                    # Degenerate case: keep zeros (already initialized)
+                    pass
+            label = y.view(t, 1)
         return label
 
     def __getitem__(self, idx: int):

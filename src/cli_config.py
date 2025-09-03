@@ -23,12 +23,13 @@ class Config:
         default="random", 
         metadata={"choices": ["random", "block"], "help": "Random or block diagonal V factors"})
     nres: int = field(default=10, metadata={"help": "Number of realizations per DGP"})
+    u_only: bool = field(default=False, metadata={"help": "If true, GTMatrices returns U only (U_only mode)"})
     
     # Task and sensing hyperparameters
     task: str = field(
         default="argmax", 
-        metadata={"choices": ["argmax", "nonlinear"], 
-                  "help": "Prediction task: argmax or arbitrary nonlinear function of row t+1"})
+        metadata={"choices": ["argmax", "nonlinear", "nonlinear_seq", "nonlin_function"], 
+                  "help": "Prediction task: argmax (classification), nonlinear (regression), nonlinear_seq, or nonlin_function (timewise regression)"})
     density: float = field(default=0.5, metadata={"help": "Target proportion of known entries"})
     num_agents: int = field(default=20, metadata={"help": "Number of agents"})
     sensing_rho: float = field(default=0.25, 

@@ -336,15 +336,17 @@ class SensingMasksTemporal(object):
         self.num_agents = int(num_agents)
         self.rho = float(rho)
         self.total_entries = self.t * self.m
+        # Use a local RNG so seeding here does not affect global randomness
+        self._gen = torch.Generator()
         if seed is not None:
-            torch.manual_seed(int(seed))
+            self._gen.manual_seed(int(seed))
         # Build per-agent column masks: [A, m]
         k = int(round(self.rho * self.m))
         k = max(min(k, self.m), 0)  # clamp to [0, m]
         masks = torch.zeros((self.num_agents, self.m), dtype=torch.bool)
         if k > 0:
             for a in range(self.num_agents):
-                cols = torch.randperm(self.m)[:k]
+                cols = torch.randperm(self.m, generator=self._gen)[:k]
                 masks[a, cols] = True
         self.col_masks = masks  # [A, m], True where observed
 

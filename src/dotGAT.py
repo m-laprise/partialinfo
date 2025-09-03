@@ -14,6 +14,11 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from datautils.sensing import SensingMasks
+try:
+    # Optional import; only needed for time-series masking helper
+    from datautils.sensing import SensingMasksTemporal  # type: ignore
+except Exception:
+    SensingMasksTemporal = None  # noqa: N816
 
 
 class DotGATHead(nn.Module):
@@ -423,4 +428,302 @@ class CollectiveInferPredict(nn.Module):
         agent_y = torch.einsum('ban,any->bay', agent_m, self.W_predict) + self.b_predict # [B, A, y_dim]
         
         return agent_y
+
+
+class DistributedDoTGATTimeSeries(nn.Module):
+    """
+    Time-series variant of DistributedDotGAT for a network of agents that exchange messages.
+    Each agent performs two attentions per message step:
+      1) Memory (temporal) self-attention over its own past states t' <= t (causal).
+      2) Social attention over its neighborhood across agents at the same time t.
+
+    Shapes used inside:
+      - Inputs per batch as matrices: [B, T, M] or agent-masked inputs [B, A, T, M].
+      - Internal hidden states h: [B, T, A, H].
+
+    If sensing_masks_temporal is provided, it will be used to expand [B, T, M] into [B, A, T, M]
+    by masking columns per agent; otherwise inputs are assumed to already be [B, A, T, M].
+
+    Optional per-timestep, per-agent prediction head outputs logits of shape [B, T, A, y_dim].
+    """
+    def __init__(
+        self,
+        device,
+        *,
+        m: int,
+        num_agents: int,
+        hidden_dim: int,
+        num_heads: int = 4,
+        message_steps: int = 1,
+        dropout: float = 0.0,
+        adjacency_mode: str = 'learned',
+        sharedV: bool = False,
+        k: int = 4,
+        p: float = 0.0,
+        freeze_zero_frac: float = 1.0,
+        sensing_masks_temporal: Optional[object] = None,  # SensingMasksTemporal
+        y_dim: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+        self.m = int(m)
+        self.n_agents = int(num_agents)
+        self.d_hidden = int(hidden_dim)
+        self.heads = int(num_heads)
+        self.head_dim = self.d_hidden // self.heads
+        self.message_steps = int(message_steps)
+        self.dropout = float(dropout)
+        self.adjacency_mode = adjacency_mode
+        self.sharedV = bool(sharedV)
+        self.y_dim = int(y_dim) if y_dim is not None else None
+        self.device_ref = device
+
+        # Optional temporal sensing masks (per-agent column masks) -> [A, M]
+        self.smt_available = sensing_masks_temporal is not None and hasattr(sensing_masks_temporal, 'col_masks')
+        if self.smt_available:
+            col_masks = sensing_masks_temporal.col_masks  # type: ignore[attr-defined]
+            self.register_buffer("agent_col_masks", col_masks.bool())  # [A, M]
+        else:
+            self.register_buffer("agent_col_masks", torch.empty(0, dtype=torch.bool))
+
+        # Per-agent row embedding: [A, M, H]
+        self.W_embed = nn.Parameter(torch.empty(self.n_agents, self.m, self.d_hidden))
+
+        # Memory attention (causal across time) per agent
+        self.W_q_mem = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        self.W_k_mem = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        if self.sharedV:
+            self.W_v_mem_shared = nn.Linear(self.d_hidden, self.d_hidden, bias=False)
+        else:
+            self.W_v_mem = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+
+        # Social attention (across agents at same time) per agent
+        self.W_q_soc = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        self.W_k_soc = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        if self.sharedV:
+            self.W_v_soc_shared = nn.Linear(self.d_hidden, self.d_hidden, bias=False)
+        else:
+            self.W_v_soc = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+
+        # Optional learned connectivity bias between agents
+        if self.message_steps > 0 and self.n_agents > 1 and self.adjacency_mode == 'learned':
+            self.connect = TrainableSmallWorld(
+                self.n_agents, device,
+                k=min(k, max(1, self.n_agents - 1)), p=p, freeze_frac=freeze_zero_frac
+            )
+
+        # Feed-forward (per-agent batched linear via einsum)
+        self.W_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        self.b_fwd1 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
+        self.W_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+        self.b_fwd2 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
+
+        # Norms & activations
+        self.prenorm = nn.RMSNorm(self.d_hidden)
+        self.memnorm = nn.RMSNorm(self.d_hidden)
+        self.socnorm = nn.RMSNorm(self.d_hidden)
+        self.mlpnorm = nn.RMSNorm(self.d_hidden)
+        self.act = nn.SiLU()
+
+        # Residual dropouts
+        self.drop_mem = nn.Dropout(self.dropout)
+        self.drop_soc = nn.Dropout(self.dropout)
+        self.drop_mlp = nn.Dropout(self.dropout)
+
+        # Optional per-timestep prediction head per agent: [A, H, y]
+        if self.y_dim is not None and self.y_dim > 0:
+            self.W_decode_pred = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.y_dim))
+            self.b_decode_pred = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
+            self.prednorm = nn.RMSNorm(self.d_hidden)
+        else:
+            self.W_decode_pred = None
+            self.b_decode_pred = None
+            self.prednorm = None
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        with torch.no_grad():
+            a_val = 1.5
+            nonlin = 'leaky_relu'
+            # Embedding
+            for i in range(self.W_embed.size(0)):
+                nn.init.kaiming_normal_(self.W_embed[i], a=a_val, mode='fan_out', nonlinearity=nonlin)
+            # Memory projections
+            for i in range(self.n_agents):
+                nn.init.xavier_uniform_(self.W_q_mem[i])
+                nn.init.xavier_uniform_(self.W_k_mem[i])
+                if not self.sharedV:
+                    nn.init.kaiming_normal_(self.W_v_mem[i], a=a_val, nonlinearity=nonlin)
+            if self.sharedV:
+                self.W_v_mem_shared.reset_parameters()
+            # Social projections
+            for i in range(self.n_agents):
+                nn.init.xavier_uniform_(self.W_q_soc[i])
+                nn.init.xavier_uniform_(self.W_k_soc[i])
+                if not self.sharedV:
+                    nn.init.kaiming_normal_(self.W_v_soc[i], a=a_val, nonlinearity=nonlin)
+            if self.sharedV:
+                self.W_v_soc_shared.reset_parameters()
+            # MLP
+            for i in range(self.n_agents):
+                nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
+                nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
+            # Prediction
+            if self.W_decode_pred is not None:
+                for i in range(self.n_agents):
+                    nn.init.xavier_uniform_(self.W_decode_pred[i])
+
+    def _apply_mlp(self, h: torch.Tensor) -> torch.Tensor:
+        # h: [B, T, A, H]
+        h = torch.einsum('btah,ahd->btad', h, self.W_fwd1) + self.b_fwd1.unsqueeze(0).unsqueeze(0)
+        h = self.act(h)
+        h = torch.einsum('btah,ahd->btad', h, self.W_fwd2) + self.b_fwd2.unsqueeze(0).unsqueeze(0)
+        return h
+
+    def _memory_attention(self, h: torch.Tensor) -> torch.Tensor:
+        """Causal self-attention across time per agent.
+        Input/Output shape: [B, T, A, H]
+        """
+        B, T, A, H = h.shape
+        q = torch.einsum('btah,ahd->btad', h, self.W_q_mem)
+        k = torch.einsum('btah,ahd->btad', h, self.W_k_mem)
+        if self.sharedV:
+            v = self.W_v_mem_shared(h)
+        else:
+            v = torch.einsum('btah,ahd->btad', h, self.W_v_mem)
+
+        # [B, T, A, H] -> [B, A, heads, T, Dh] -> merge BA
+        q = q.view(B, T, A, self.heads, self.head_dim).permute(0, 2, 3, 1, 4).contiguous()
+        k = k.view(B, T, A, self.heads, self.head_dim).permute(0, 2, 3, 1, 4).contiguous()
+        v = v.view(B, T, A, self.heads, self.head_dim).permute(0, 2, 3, 1, 4).contiguous()
+        q = q.view(B * A, self.heads, T, self.head_dim)
+        k = k.view(B * A, self.heads, T, self.head_dim)
+        v = v.view(B * A, self.heads, T, self.head_dim)
+
+        dropout_p = self.dropout if self.training else 0.0
+        if q.is_cuda:
+            backends_ok = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+            with sdpa_kernel(backends_ok, set_priority=True):
+                out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
+
+        # Back to [B, T, A, H]
+        out = out.view(B, A, self.heads, T, self.head_dim).permute(0, 3, 1, 2, 4).contiguous()
+        out = out.view(B, T, A, H)
+        return out
+
+    def _social_attention(self, h: torch.Tensor) -> torch.Tensor:
+        """Attention across agents per time step using optional adjacency bias.
+        Input/Output shape: [B, T, A, H]
+        """
+        B, T, A, H = h.shape
+        q = torch.einsum('btah,ahd->btad', h, self.W_q_soc)
+        k = torch.einsum('btah,ahd->btad', h, self.W_k_soc)
+        if self.sharedV:
+            v = self.W_v_soc_shared(h)
+        else:
+            v = torch.einsum('btah,ahd->btad', h, self.W_v_soc)
+
+        # [B, T, A, H] -> [B, T, heads, A, Dh] -> merge BT
+        q = q.view(B, T, A, self.heads, self.head_dim).permute(0, 1, 3, 2, 4).contiguous()
+        k = k.view(B, T, A, self.heads, self.head_dim).permute(0, 1, 3, 2, 4).contiguous()
+        v = v.view(B, T, A, self.heads, self.head_dim).permute(0, 1, 3, 2, 4).contiguous()
+        q = q.view(B * T, self.heads, A, self.head_dim)
+        k = k.view(B * T, self.heads, A, self.head_dim)
+        v = v.view(B * T, self.heads, A, self.head_dim)
+
+        attn_bias = None
+        if hasattr(self, 'connect') and self.adjacency_mode == 'learned':
+            attn_bias = self.connect()  # [1, A, A]
+            attn_bias = attn_bias.to(device=q.device, dtype=q.dtype).unsqueeze(1)  # [1, 1, A, A]
+
+        dropout_p = self.dropout if self.training else 0.0
+        if q.is_cuda:
+            backends_ok = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+            with sdpa_kernel(backends_ok, set_priority=True):
+                out = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attn_bias, dropout_p=dropout_p, is_causal=False
+                )
+        else:
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_bias, dropout_p=dropout_p, is_causal=False
+            )
+
+        out = out.view(B, T, self.heads, A, self.head_dim).permute(0, 1, 3, 2, 4).contiguous()
+        out = out.view(B, T, A, H)
+        return out
+
+    def _maybe_mask_inputs(self, X: torch.Tensor) -> torch.Tensor:
+        """Ensure inputs are [B, A, T, M], applying per-agent column masks if needed.
+        Accepts [B, T, M], [T, M], [B, A, T, M], or [A, T, M].
+        """
+        if X.dim() == 3:  # [B, T, M]
+            assert self.smt_available, "Provide SensingMasksTemporal or pass [B, A, T, M] inputs."
+            B, T, M = X.shape
+            assert M == self.m, f"Expected last dim M={self.m}, got {M}"
+            col_masks = self.agent_col_masks.to(device=X.device)  # [A, M]
+            X_BA_tm = X.unsqueeze(1).repeat(1, self.n_agents, 1, 1)  # [B, A, T, M]
+            return X_BA_tm * col_masks[None, :, None, :]
+        elif X.dim() == 2:  # [T, M]
+            assert self.smt_available, "Provide SensingMasksTemporal or pass [A, T, M] inputs."
+            T, M = X.shape
+            assert M == self.m
+            col_masks = self.agent_col_masks.to(device=X.device)
+            X_A_tm = X.unsqueeze(0).repeat(self.n_agents, 1, 1)  # [A, T, M]
+            return (X_A_tm * col_masks[:, None, :]).unsqueeze(0)  # [1, A, T, M]
+        elif X.dim() == 4 and X.shape[1] == self.n_agents:  # [B, A, T, M]
+            assert X.shape[-1] == self.m
+            return X
+        elif X.dim() == 3 and X.shape[0] == self.n_agents:  # [A, T, M]
+            assert X.shape[-1] == self.m
+            return X.unsqueeze(0)  # [1, A, T, M]
+        else:
+            raise ValueError(f"Unexpected input shape {tuple(X.shape)}; expected [B,T,M], [T,M], [B,A,T,M], or [A,T,M]")
+
+    def forward(self, X: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward through K message passing steps with memory and social attentions.
+
+        Args:
+            X: inputs with shapes [B, T, M] (will be masked using SensingMasksTemporal)
+               or pre-masked [B, A, T, M].
+
+        Returns:
+            h: final hidden states [B, T, A, H]
+            y: optional per-timestep predictions [B, T, A, y_dim] if y_dim was provided
+        """
+        # Prepare [B, A, T, M]
+        X = self._maybe_mask_inputs(X)
+        B, A, T, M = X.shape
+        assert A == self.n_agents and M == self.m
+
+        # Per-agent embedding of each time row -> [B, T, A, H]
+        h = torch.einsum('batm,amh->bath', X, self.W_embed)  # [B, A, T, H]
+        h = h.permute(0, 2, 1, 3).contiguous()  # [B, T, A, H]
+        h = self.prenorm(h)
+
+        if self.message_steps > 0 and self.n_agents > 0:
+            for _ in range(self.message_steps):
+                # Memory attention over time (causal) per agent
+                h_mem = self._memory_attention(self.memnorm(h))
+                h = h + self.drop_mem(h_mem)
+
+                # Social attention across agents at each time step
+                if self.n_agents > 1:
+                    h_soc = self._social_attention(self.socnorm(h))
+                    h = h + self.drop_soc(h_soc)
+
+                # Feed-forward
+                h_ff = self._apply_mlp(self.mlpnorm(h))
+                h = h + self.drop_mlp(h_ff)
+
+        y = None
+        if self.y_dim is not None and self.y_dim > 0:
+            # Per-agent, per-time predictions
+            h_pred = self.prednorm(h) if self.prednorm is not None else h
+            y = torch.einsum('btah,ahy->btay', h_pred, self.W_decode_pred) + self.b_decode_pred.unsqueeze(0).unsqueeze(0)  # type: ignore[arg-type]
+
+        return h, y
     

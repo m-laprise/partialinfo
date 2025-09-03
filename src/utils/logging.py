@@ -18,12 +18,16 @@ def atomic_save(state, path: str):
 
 
 def snapshot(model, aggregator, epoch, args):
-    return {
+    state = {
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-        "aggregator": {k: v.detach().cpu() for k, v in aggregator.state_dict().items()},
         "epoch": epoch,
         "args": vars(args),
     }
+    if aggregator is not None:
+        state["aggregator"] = {k: v.detach().cpu() for k, v in aggregator.state_dict().items()}
+    else:
+        state["aggregator"] = {}
+    return state
     
 
 def init_stats(
@@ -61,13 +65,26 @@ def init_stats(
 
 def printlog(task, epoch, stats, METRIC_KEYS):
     if task == 'classif':
-        print(f"Ep {epoch:03d}. ",
-              f"T loss: {stats['train_loss'][-1]:.2e} | T acc: {stats['t_accuracy'][-1]:.2f} | T % maj: {stats['t_agreement'][-1]:.2f} | ",
-              f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}")
+        print(
+            f"Ep {epoch:03d}. ",
+            f"T loss: {stats['train_loss'][-1]:.2e} | T acc: {stats['t_accuracy'][-1]:.2f} | T % maj: {stats['t_agreement'][-1]:.2f} | ",
+            f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}"
+        )
     else:
-        print(f"Ep {epoch:03d}. ",
-              f"Loss: {stats['train_loss'][-1]:.4f} | T var: {stats['t_diversity'][-1]:.2f} || V loss: {stats['val_loss'][-1]:.4f} |",
-              f"V mse: {stats['val_mse'][-1]:.4f} | V var: {stats['val_diversity'][-1]:.2f}")
+        # Regression: if mse/diversity keys exist, print the rich format; otherwise, fallback to simple losses
+        has_mse = 'val_mse' in stats and len(stats['val_mse']) > 0
+        has_div = 'val_diversity' in stats and len(stats['val_diversity']) > 0
+        if has_mse and has_div:
+            print(
+                f"Ep {epoch:03d}. ",
+                f"Loss: {stats['train_loss'][-1]:.4f} | T var: {stats.get('t_diversity', [0])[-1]:.2f} || V loss: {stats['val_loss'][-1]:.4f} |",
+                f"V mse: {stats['val_mse'][-1]:.4f} | V var: {stats['val_diversity'][-1]:.2f}"
+            )
+        else:
+            print(
+                f"Ep {epoch:03d}. ",
+                f"T loss: {stats['train_loss'][-1]:.4f} | V loss: {stats['val_loss'][-1]:.4f}"
+            )
     pass
 
 
@@ -78,7 +95,23 @@ def log_training_run(
     if task_cat == 'classif':
         test_loss, test_accuracy, test_agreement = test_stats
     elif task_cat == 'regression':
-        test_loss, test_mse, test_diversity = test_stats
+        # Accept flexible test_stats shapes
+        if isinstance(test_stats, (list, tuple)):
+            if len(test_stats) == 3:
+                test_loss, test_mse, test_diversity = test_stats
+            elif len(test_stats) == 1:
+                test_loss = test_stats[0]
+                test_mse = float('nan')
+                test_diversity = float('nan')
+            else:
+                # Fallback
+                test_loss = test_stats[0]
+                test_mse = float('nan')
+                test_diversity = float('nan')
+        else:
+            test_loss = float(test_stats)
+            test_mse = float('nan')
+            test_diversity = float('nan')
     else:
         raise NotImplementedError(f"Task {task_cat} not implemented.")
  
@@ -136,7 +169,8 @@ def log_training_run(
         # Model parameter counts
         f.write("Trainable Parameters\n")
         f.write("---------------------\n")
-        for name, module in [("Main Model", model), ("Aggregator", aggregator)]:
+        modules = [("Main Model", model)] + (([("Aggregator", aggregator)] if aggregator is not None else []))
+        for name, module in modules:
             total = sum(p.numel() for p in module.parameters() if p.requires_grad)
             f.write(f"{name} - Total: {total:,} parameters\n")
             f.write("Breakdown by layer:\n")
@@ -165,16 +199,25 @@ def log_training_run(
                 f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f}    | {vl:.2e} | {va:.2f}    | {vm:.2f}\n")
         
         else:
-            f.write(f"Final Test MSE: {test_mse:.2e}\n")
-            f.write(f"Final Test Diversity: {test_diversity:.2f}\n\n")
+            if not (torch.isnan(torch.tensor(test_mse)) or torch.isnan(torch.tensor(test_diversity))):
+                f.write(f"Final Test MSE: {test_mse:.2e}\n")
+                f.write(f"Final Test Diversity: {test_diversity:.2f}\n\n")
+            else:
+                f.write("\n")
 
             f.write("Epoch Performance\n")
             f.write("-----------------\n")
-            f.write("Epoch | Train Loss | V loss   | V mse    | V var   \n")
-            f.write("------|------------|----------|----------|---------\n")
-            for i, (tl, vl, vmm, vvm) in enumerate(
-                zip(stats["train_loss"], stats["val_loss"], stats["val_mse"], stats["val_diversity"]), 1
-            ):
-                f.write(f"{i:5d} | {tl:.2e}   | {vl:.2e} | {vmm:.2e} | {vvm:.4f}\n")
+            if "val_mse" in stats and "val_diversity" in stats:
+                f.write("Epoch | Train Loss | V loss   | V mse    | V var   \n")
+                f.write("------|------------|----------|----------|---------\n")
+                for i, (tl, vl, vmm, vvm) in enumerate(
+                    zip(stats["train_loss"], stats["val_loss"], stats["val_mse"], stats["val_diversity"]), 1
+                ):
+                    f.write(f"{i:5d} | {tl:.2e}   | {vl:.2e} | {vmm:.2e} | {vvm:.4f}\n")
+            else:
+                f.write("Epoch | Train Loss | Val Loss\n")
+                f.write("------|------------|---------\n")
+                for i, (tl, vl) in enumerate(zip(stats["train_loss"], stats["val_loss"]), 1):
+                    f.write(f"{i:5d} | {tl:.2e}   | {vl:.2e}\n")
 
     print(f"Training log saved to: {log_file}")

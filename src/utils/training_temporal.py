@@ -149,7 +149,7 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
 
         optimizer.zero_grad(set_to_none=True)
 
-        if isinstance(model, DynamicDotGAT):
+        if hasattr(model, "W_q_mem"):
             x_btm = _btm_from_batch(batch, t, m, device)           # [B,T,M]
             target = _bty_labels_from_batch(batch, t, device)       # [B,T,y_dim]
             B = target.size(0)

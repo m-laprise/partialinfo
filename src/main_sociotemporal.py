@@ -5,14 +5,15 @@ per-agent MSE to labels, averaged over time and then averaged across agents for 
 Task: cfg.task must be 'nonlin_function' (TemporalData yields labels [T,1]).
 """
 
+import gc
+import os
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime
-import os
-import gc
 
 import torch
-from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from cli_config import Config, build_parser_from_dataclass, load_config
@@ -149,8 +150,9 @@ if __name__ == "__main__":
         else:
             model.eval()
         use_amp = (device.type == 'cuda') and (scaler is not None)
-        autocast_ctx = autocast(device_type='cuda') if use_amp else torch.no_grad()
-
+        #autocast_ctx = autocast(device_type='cuda') if use_amp else torch.no_grad()
+        autocast_ctx = autocast(device_type='cuda') if use_amp else nullcontext()
+        
         total_loss = 0.0
         total_examples = 0
         for batch in loader:
@@ -248,8 +250,14 @@ if __name__ == "__main__":
 
     # Save logs
     log_training_run(
-        unique_filename(prefix="socio_reg"), cfg, {
+        unique_filename(prefix="socio_reg"), cfg, 
+        stats={
             'train_loss': stats['train_loss'],
             'val_loss': stats['val_loss'],
-        }, start, end, model, None, 'regression'
+        }, 
+        test_stats={
+            'test_loss': test_loss,
+        }, 
+        start_time=start, end_time=end, 
+        model=model, aggregator=None, task_cat='regression'
     )

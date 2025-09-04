@@ -21,7 +21,7 @@ from datautils.datagen_temporal import GTMatrices, TemporalData
 from datautils.sensing import SensingMasksTemporal
 from dotGAT import DynamicDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
-from utils.misc import count_parameters, unique_filename
+from utils.misc import count_parameters, sequential_split, unique_filename
 
 
 def _btm_from_batch(batch, t: int, m: int, device: torch.device) -> torch.Tensor:
@@ -65,7 +65,7 @@ def create_temporal_loaders(cfg: Config):
             U_only=cfg.u_only
         )
         all_data = TemporalData(all_GT, task=cfg.task, verbose=True)
-        train_data, val_data, test_data = torch.utils.data.random_split(
+        train_data, val_data, test_data = sequential_split(
             all_data, [cfg.train_n, cfg.val_n, cfg.test_n]
         )
 

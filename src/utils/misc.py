@@ -1,7 +1,16 @@
 import os
 from datetime import datetime
+from itertools import accumulate
 
 import torch
+from torch.utils.data import Subset
+
+
+def sequential_split(dataset, lengths):
+    if sum(lengths) != len(dataset):
+        raise ValueError("lengths must sum to len(dataset)")
+    cuts = [0, *accumulate(lengths)]
+    return [Subset(dataset, range(a, b)) for a, b in zip(cuts, cuts[1:])]
 
 
 def count_parameters(model):

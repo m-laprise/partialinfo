@@ -71,7 +71,7 @@ if __name__ == "__main__":
     # SETUP DATA
     train_loader, val_loader, test_loader, sensingmasks = create_data(cfg)
     if cfg.memory is True:
-        globalmask = torch.ones(cfg.t * cfg.m, dtype=torch.bool, device=device)
+        globalmask = torch.ones(cfg.t * cfg.m, dtype=torch.bool)
     else:
         globalmask = sensingmasks.global_known      # type: ignore
     

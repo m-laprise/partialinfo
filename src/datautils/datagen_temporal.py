@@ -369,7 +369,7 @@ class TemporalData(Dataset):
     """
     def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, target_source: str = 'observed', verbose=True, rho_out: float = 0.4):
         super().__init__()
-        if task not in ['argmax', 'nextrow', 'nonlinear_seq', 'nonlin_function']:
+        if task not in ['argmax', 'lastrow', 'nextrow', 'nonlinear_seq', 'nonlin_function']:
             raise NotImplementedError(f"Task {task} not implemented")
         
         # Keep a reference to GT to optionally build targets from latent factors
@@ -401,7 +401,7 @@ class TemporalData(Dataset):
         if self.task == 'argmax':
             # Label is the index of the maximum entry in the last row
             label = torch.argmax(matrix[-1, :])
-        elif self.task == 'nextrow':
+        elif self.task == 'lastrow':
             # Label is the last row 
             label = matrix[-1, :]
         elif self.task == 'nonlin_function':

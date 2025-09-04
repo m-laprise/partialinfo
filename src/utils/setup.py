@@ -75,7 +75,7 @@ def setup_model(args, sensingmasks, device, task_cat):
     if args.memory is True:
         if args.task == 'nonlin_function':
             y_dim = 1
-        elif args.task == 'nextrow':
+        elif args.task == 'lastrow':
             y_dim = args.m
         else:
             raise NotImplementedError(f"Task {args.task} not implemented for memory network")

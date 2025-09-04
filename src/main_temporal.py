@@ -50,9 +50,12 @@ if __name__ == "__main__":
 
     print("Effective config:", asdict(cfg))
     
+    if cfg.memory is True and cfg.task not in ['nonlin_function']:
+        raise NotImplementedError(f"Memory network not implemented for task {cfg.task}.")
+    
     if cfg.task == 'argmax':
         task_cat = 'classif'
-    elif cfg.task in ['nextrow', 'nonlin_function']:
+    elif cfg.task in ['lastrow', 'nonlin_function']:
         task_cat = 'regression'
     else:
         raise NotImplementedError(f"Task {cfg.task} not implemented")

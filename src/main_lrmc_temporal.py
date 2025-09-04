@@ -52,7 +52,7 @@ if __name__ == "__main__":
     
     if cfg.task == 'argmax':
         task_cat = 'classif'
-    elif cfg.task == 'nonlinear':
+    elif cfg.task == 'nextrow':
         task_cat = 'regression'
     else:
         raise NotImplementedError(f"Task {cfg.task} not implemented")

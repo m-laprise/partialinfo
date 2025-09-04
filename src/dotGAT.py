@@ -666,14 +666,14 @@ class DynamicDotGAT(nn.Module):
             assert M == self.m, f"Expected last dim M={self.m}, got {M}"
             col_masks = self.agent_col_masks.to(device=X.device)  # [A, M]
             X_BA_tm = X.unsqueeze(1).repeat(1, self.n_agents, 1, 1)  # [B, A, T, M]
-            return X_BA_tm * col_masks[None, :, None, :]
+            return X_BA_tm * col_masks[None, :, None, :] # type: ignore
         elif X.dim() == 2:  # [T, M]
             assert self.smt_available, "Provide SensingMasksTemporal or pass [A, T, M] inputs."
             T, M = X.shape
             assert M == self.m
             col_masks = self.agent_col_masks.to(device=X.device)
             X_A_tm = X.unsqueeze(0).repeat(self.n_agents, 1, 1)  # [A, T, M]
-            return (X_A_tm * col_masks[:, None, :]).unsqueeze(0)  # [1, A, T, M]
+            return (X_A_tm * col_masks[:, None, :]).unsqueeze(0)  # [1, A, T, M] # type: ignore
         elif X.dim() == 4 and X.shape[1] == self.n_agents:  # [B, A, T, M]
             assert X.shape[-1] == self.m
             return X

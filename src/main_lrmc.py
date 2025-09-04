@@ -61,11 +61,11 @@ import torch.nn as nn
 from torch.amp.grad_scaler import GradScaler
 from torch_geometric.loader import DataLoader
 
-from datagen import AgentMatrixReconstructionDataset
+from datautils.datagen_lrmc import AgentMatrixReconstructionDataset
 from dotGAT import Aggregator, DistributedDotGAT, ReconDecoder
 from utils.misc import count_parameters, unique_filename
 from utils.plotting import plot_stats
-from utils.training import evaluate, init_stats, init_weights, train
+from utils.training_lrmc import evaluate, init_stats, init_weights, train
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

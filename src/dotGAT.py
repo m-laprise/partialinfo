@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from datautils.sensing import SensingMasks
+
 try:
     # Optional import; only needed for time-series masking helper
     from datautils.sensing import SensingMasksTemporal  # type: ignore
@@ -430,7 +431,7 @@ class CollectiveInferPredict(nn.Module):
         return agent_y
 
 
-class DistributedDoTGATTimeSeries(nn.Module):
+class DynamicDotGAT(nn.Module):
     """
     Time-series variant of DistributedDotGAT for a network of agents that exchange messages.
     Each agent performs two attentions per message step:

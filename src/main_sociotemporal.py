@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from cli_config import Config, build_parser_from_dataclass, load_config
 from datautils.datagen_temporal import GTMatrices, TemporalData
 from datautils.sensing import SensingMasksTemporal
-from dotGAT import DistributedDoTGATTimeSeries
+from dotGAT import DynamicDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
 
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     smt = SensingMasksTemporal(full_data, num_agents=cfg.num_agents, rho=cfg.sensing_rho)
 
     # Model (time-series, causal). y_dim=1 for scalar per agent per time step.
-    model = DistributedDoTGATTimeSeries(
+    model = DynamicDotGAT(
         device=device,
         m=cfg.m,
         num_agents=cfg.num_agents,
@@ -255,9 +255,7 @@ if __name__ == "__main__":
             'train_loss': stats['train_loss'],
             'val_loss': stats['val_loss'],
         }, 
-        test_stats={
-            'test_loss': test_loss,
-        }, 
+        test_stats=test_loss,
         start_time=start, end_time=end, 
         model=model, aggregator=None, task_cat='regression'
     )

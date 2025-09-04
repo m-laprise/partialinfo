@@ -290,7 +290,7 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, t, m, max_ba
         if max_batches is not None and i >= max_batches:
             break
 
-        if isinstance(model, DynamicDotGAT):
+        if hasattr(model, "W_q_mem"):
             x_btm = _btm_from_batch(batch, t, m, device)
             target = _bty_labels_from_batch(batch, t, device)
             B = target.size(0)

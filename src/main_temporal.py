@@ -87,7 +87,8 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         print("Compiling model and aggregator with torch.compile...")  
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True) # also should try: "max-autotune"
-        aggregator = torch.compile(aggregator, mode='reduce-overhead', fullgraph=True)
+        if aggregator is not None:
+            aggregator = torch.compile(aggregator, mode='reduce-overhead', fullgraph=True)
         print("torch.compile done.")
     
     # SET UP TRAINING

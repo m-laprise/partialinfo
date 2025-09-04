@@ -4,8 +4,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from datautils.datagen_temporal import GTMatrices, TemporalData
-from datautils.sensing import SensingMasks
-from dotGAT import CollectiveClassifier, CollectiveInferPredict, DistributedDotGAT
+from datautils.sensing import SensingMasks, SensingMasksTemporal
+from dotGAT import (
+    CollectiveClassifier,
+    CollectiveInferPredict,
+    DistributedDotGAT,
+    DynamicDotGAT,
+)
+from utils.misc import sequential_split
 
 
 def create_data(args):
@@ -18,11 +24,14 @@ def create_data(args):
     with torch.no_grad():  
         totN = args.train_n + args.val_n + args.test_n
         all_GT = GTMatrices(N=totN, t=args.t, m=args.m, r=args.r, 
-                              realizations = args.nres, mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype)
+                              realizations = args.nres, mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype, U_only=args.u_only)
         all_data = TemporalData(all_GT, task=args.task, verbose=True)
-        sensingmasks = SensingMasks(all_data, args.r, args.num_agents, args.density, 
-                                    rho=args.sensing_rho, gamma=args.sensing_gamma)
-        train_data, val_data, test_data = torch.utils.data.random_split(
+        if args.memory is True:
+            sensingmasks = SensingMasksTemporal(all_data, args.num_agents, args.sensing_rho)
+        else:
+            sensingmasks = SensingMasks(all_data, args.r, args.num_agents, args.density, 
+                                        rho=args.sensing_rho, gamma=args.sensing_gamma)
+        train_data, val_data, test_data = sequential_split(
             all_data, [args.train_n, args.val_n, args.test_n]
         )
     
@@ -30,15 +39,20 @@ def create_data(args):
     print(f"Number of workers: {num_workers}")
     pin = torch.cuda.is_available()
     persistent = num_workers > 0
+    if args.memory is True:
+        shuffle = False
+    else:
+        shuffle = True
+    
     train_loader = DataLoader(
         train_data, 
         batch_size=args.batch_size, 
-        shuffle=True,
+        shuffle=shuffle,
         pin_memory=pin, 
         num_workers=num_workers,
         persistent_workers=persistent,
         prefetch_factor=2 if persistent else None,
-        drop_last=True,
+        drop_last=shuffle,
     )
     val_loader = DataLoader(
         val_data, 
@@ -58,21 +72,43 @@ def create_data(args):
 
 
 def setup_model(args, sensingmasks, device, task_cat):
-    model = DistributedDotGAT(
-        device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
-        num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, 
-        dropout=args.dropout, message_steps=args.steps, adjacency_mode=args.adjacency_mode, 
-        k=args.nb_ties, sensing_masks=sensingmasks
-    )
-    
-    if task_cat == 'classif':
-        aggregator = CollectiveClassifier(
-            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
+    if args.memory is True:
+        if args.task == 'nonlin_function':
+            y_dim = 1
+        elif args.task == 'nextrow':
+            y_dim = args.m
+        else:
+            raise NotImplementedError(f"Task {args.task} not implemented for memory network")
+
+        model = DynamicDotGAT(
+            device=device, m=args.m,
+            num_agents=args.num_agents,
+            hidden_dim=args.hidden_dim,
+            num_heads=args.att_heads,
+            message_steps=args.steps,
+            dropout=args.dropout,
+            adjacency_mode=args.adjacency_mode,
+            sharedV=args.sharedv,
+            k=args.nb_ties,
+            sensing_masks_temporal=sensingmasks, 
+            y_dim=y_dim,
         )
-        
-    elif task_cat == 'regression':
-        aggregator = CollectiveInferPredict(
-            num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
+        aggregator = None
+    else:
+        model = DistributedDotGAT(
+            device=device, input_dim=args.t * args.m, hidden_dim=args.hidden_dim, n=args.t, m=args.m,
+            num_agents=args.num_agents, num_heads=args.att_heads, sharedV=args.sharedv, 
+            dropout=args.dropout, message_steps=args.steps, adjacency_mode=args.adjacency_mode, 
+            k=args.nb_ties, sensing_masks=sensingmasks
         )
+        if task_cat == 'classif':
+            aggregator = CollectiveClassifier(
+                num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m
+            )
+            
+        elif task_cat == 'regression':
+            aggregator = CollectiveInferPredict(
+                num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
+            )
     
     return model, aggregator

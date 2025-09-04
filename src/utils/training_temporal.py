@@ -7,6 +7,27 @@ import torch.nn as nn
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
+from dotGAT import DynamicDotGAT
+
+
+def _btm_from_batch(batch, t: int, m: int, device: torch.device) -> torch.Tensor:
+    x = batch['matrix'].to(device, non_blocking=True)
+    if x.dim() == 2 and x.shape[1] == t * m:
+        return x.view(-1, t, m)
+    if x.dim() == 3 and x.shape[-1] == t * m:
+        B = x.shape[0]
+        return x.view(B, t, m)
+    if x.dim() == 3 and x.shape[1:] == (t, m):
+        return x
+    raise ValueError(f"Unexpected matrix shape {tuple(x.shape)}; expected [B,t*m], [B,1,t*m], or [B,t,m]")
+
+
+def _bty_labels_from_batch(batch, t: int, device: torch.device) -> torch.Tensor:
+    y = batch['label'].to(device, non_blocking=True)  # [B,T,y_dim]
+    if y.dim() == 3 and y.shape[1] == t:
+        return y
+    raise ValueError(f"Unexpected label shape {tuple(y.shape)}; expected [B,T,y_dim]")
+
 
 def stacked_cross_entropy_loss(logits: torch.Tensor,
                                targets: torch.Tensor,
@@ -50,46 +71,69 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
     else:
         raise ValueError(f"Invalid reduction type: {reduction}")
     
-    
+
+import torch
+
+
 def stacked_MSE(predictions: torch.Tensor,
                 targets: torch.Tensor,
                 reduction: str = 'mean') -> torch.Tensor:
     """
-    Computes MSE loss over stacked agent predictions of last row.
-    predictions: [B, A, m]
-    targets: [B, m]
-    
-    Returns torch.Tensor: Scalar loss (if reduced) or tensor of shape [batch_size, A] (if 'none').
+    Computes MSE loss over stacked agent predictions.
+
+    Returns:
+        Scalar loss (if reduced) or tensor of shape [B, A] (if 'none').
     """
-    if predictions.dim() != 3:
-        raise ValueError(f"Expected logits with 3 dims [batch_size, n_agents, m], got {predictions.shape}")
     if predictions.shape[-1] != targets.shape[-1]:
-        raise ValueError("Mismatched predictions and targets, loss cannot be computed.")
-    if targets.dim() != 2:
-        raise ValueError(f"Expected targets with 2 dims [batch_size, m], got {targets.shape}")
-    
-    B, A, m = predictions.shape # m = m + 1
-    
-    # Expand and reshape 
-    expanded_targets = targets.unsqueeze(1).expand(-1, A, -1).reshape(-1, m)  # [B * A, m + y_dim]
-    predictions_flat = predictions.reshape(-1, m)                             # [B * A, m + y_dim]
-    # Compute per-prediction MSE loss
-    losses = nn.MSELoss(reduction='none')(predictions_flat, expanded_targets)   # [B * A, m + y_dim]
+        raise ValueError(f"Mismatched predictions ({predictions.shape}) and targets ({targets.shape}), loss cannot be computed.")
 
-    # Apply reduction
-    if reduction == 'mean':
-        return losses.mean()
-    elif reduction == 'sum':
-        return losses.sum()
-    elif reduction == 'none':
-        return losses.mean(dim=1).view(B, A)                                    # [B, A]
+    if predictions.dim() == 4:
+        # predictions: [B, T, A, y_dim]
+        # targets:     [B, T, y_dim]
+        B, T, A, y_dim = predictions.shape
+        if targets.shape != (B, T, y_dim):
+            raise ValueError(f"For 4D predictions expected targets shape [B, T, y_dim], got {targets.shape}")
+
+        # elementwise squared error: [B, T, A, y_dim]
+        errors = (predictions - targets.unsqueeze(2)) ** 2
+
+        if reduction == 'mean':
+            return errors.mean()
+        elif reduction == 'sum':
+            return errors.sum()
+        elif reduction == 'none':
+            # average over y_dim then over time -> [B, A]
+            return errors.mean(dim=-1).mean(dim=1)
+        else:
+            raise ValueError(f"Invalid reduction type: {reduction}")
+
+    elif predictions.dim() == 3:
+        # predictions: [B, A, y_dim]
+        # targets:     [B, y_dim]
+        B, A, y_dim = predictions.shape
+        if targets.shape != (B, y_dim):
+            raise ValueError(f"For 3D predictions expected targets shape [B, y_dim], got {targets.shape}")
+
+        errors = (predictions - targets.unsqueeze(1)) ** 2  # [B, A, y_dim]
+
+        if reduction == 'mean':
+            return errors.mean()
+        elif reduction == 'sum':
+            return errors.sum()
+        elif reduction == 'none':
+            # average over y_dim -> [B, A]
+            return errors.mean(dim=-1)
+        else:
+            raise ValueError(f"Invalid reduction type: {reduction}")
+
     else:
-        raise ValueError(f"Invalid reduction type: {reduction}")
+        raise ValueError(f"Expected predictions with 3 dims [B, n_agents, y_dim] or 4 dims [B, time, n_agents, y_dim], got {predictions.shape}")
 
 
-def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optional[GradScaler]):
+def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optional[GradScaler], *, t, m):
     model.train()
-    aggregator.train()
+    if aggregator is not None:
+        aggregator.train()
     use_amp = (device.type == 'cuda') and (scaler is not None)
     autocast_ctx = autocast(device_type='cuda') if use_amp else nullcontext()
     
@@ -105,30 +149,43 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
 
         optimizer.zero_grad(set_to_none=True)
 
-        x = batch['matrix'].to(device, non_blocking=True)       # [batch_size, t * m]
-        target = batch['label'].to(device, non_blocking=True)   # [batch_size]
-        B = target.size(0)
-        
-        with autocast_ctx:
-            logits = aggregator(model(x))
-            loss = criterion(logits, target, reduction='mean')
+        if isinstance(model, DynamicDotGAT):
+            x_btm = _btm_from_batch(batch, t, m, device)           # [B,T,M]
+            target = _bty_labels_from_batch(batch, t, device)       # [B,T,y_dim]
+            B = target.size(0)
+            with autocast_ctx:
+                h, y_btay = model(x_btm)        # y: [B,T,A,y_dim]
+                loss = criterion(y_btay, target, reduction ='mean')
+        else:
+            x = batch['matrix'].to(device, non_blocking=True)       # [batch_size, t * m]
+            target = batch['label'].to(device, non_blocking=True)   # [batch_size]
+            B = target.size(0)
+            with autocast_ctx:
+                logits = aggregator(model(x))
+                loss = criterion(logits, target, reduction='mean')
             
         if use_amp:
             scaler.scale(loss).backward()   # type: ignore
             scaler.unscale_(optimizer)      # type: ignore
             # clip both model + aggregator
-            torch.nn.utils.clip_grad_norm_(
-                list(model.parameters()) + list(aggregator.parameters()),
-                max_norm=1.0
-            )
+            if aggregator is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + list(aggregator.parameters()),
+                    max_norm=1.0
+                )
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)          # type: ignore
             scaler.update()                 # type: ignore
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(model.parameters()) + list(aggregator.parameters()),
-                max_norm=1.0
-            )
+            if aggregator is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + list(aggregator.parameters()),
+                    max_norm=1.0
+                )
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
         total_loss += loss.item() * B
@@ -161,47 +218,52 @@ def classif_vote_acc_agree(logits, target):
     return batch_acc, batch_agree
 
 
-def regression_acc_agree(logits, target):    
+def regression_acc_agree(logits: torch.Tensor, target: torch.Tensor):
     """
-    For each example, take average prediction and compute per-entry MSE of the average with the targer.
+    For each example, take average prediction and compute per-entry MSE of the average with the target.
     For each example, compute inter-agent variance of predictions.
     Return batch sum for each quantity.
-    Args: 
-        logits: [B, A, m or y_dim]
-        target: [B, m or y_dim]
+    Args:
+        logits: [B, ..., A, D]   (A = n_agents, D = m or y_dim)
+        target: [B, ..., D]
+    Returns:
+        (batch_mse_sum: float, batch_variance_sum: float)
     """
-    # Accept 2D inputs for scalar target case by promoting to 3D/2D as needed.
-    if logits.dim() == 2:         # [B, A] -> [B, A, 1]
+    # Accept 2D inputs for scalar target by promoting as needed
+    if logits.dim() == 2:          # [B, A] -> [B, A, 1]
         logits = logits.unsqueeze(-1)
-    if target.dim() == 1:         # [B]    -> [B, 1]
+    if target.dim() == 1:         # [B] -> [B, 1]
         target = target.unsqueeze(-1)
 
-    B, A, D = logits.shape
+    if logits.dim() < 3:
+        raise ValueError(f"Expected logits with at least 3 dims [B, ..., A, D], got {tuple(logits.shape)}")
 
-    # Average prediction across agents: [B, D]
-    avg_preds = logits.mean(dim=1)
+    # Shape-check: target must match logits except for the agent axis
+    expected_target_shape = tuple(logits.shape[:-2]) + (logits.shape[-1],)
+    if tuple(target.shape) != expected_target_shape:
+        raise ValueError(f"Shape mismatch: expected target shape {expected_target_shape}, got {tuple(target.shape)}")
 
-    # Per-example, per-entry MSE -> [B]; then sum across batch
-    #mse_per_example = ((avg_preds - target) ** 2).mean(dim=1)  # mean over D
-    mse_per_example = nn.MSELoss(reduction='none')(avg_preds, target).mean(dim=1)
-    batch_mse_sum = mse_per_example.sum().item()
+    # Average across agents -> [B, *extra, D]
+    avg_preds = logits.mean(dim=-2)
 
-    # Inter-agent diversity
+    # MSE per example: flatten all non-batch dims and average per-row -> [B]
+    mse_per_example = ((avg_preds - target).pow(2)).flatten(start_dim=1).mean(dim=1)
+    batch_mse_sum = float(mse_per_example.sum().item())
+
+    # Inter-agent variance: var across agents -> [B, *extra, D], then flatten & mean as above
+    A = logits.shape[-2]
     if A == 1:
-        batch_variance_sum = 0
-    elif D > 1: # [B, A, m] case
-        var = logits.var(dim=1, unbiased=False) # [B, m] Inter-agent variance for each m; 
-        variance_per_example = var.mean(dim=1)  # [B]    Mean over m
-        batch_variance_sum = variance_per_example.sum().item()
-    elif D == 1: # [B, A, 1] case
-        variance_per_example = logits.squeeze(-1).var(dim=1, unbiased=False)  # [B]
-        batch_variance_sum = variance_per_example.sum().item()
+        batch_variance_sum = 0.0
+    else:
+        var_across_agents = logits.var(dim=-2, unbiased=False)
+        variance_per_example = var_across_agents.flatten(start_dim=1).mean(dim=1)
+        batch_variance_sum = float(variance_per_example.sum().item())
 
     return batch_mse_sum, batch_variance_sum
 
 
 @torch.inference_mode()
-def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=None):
+def evaluate(model, aggregator, loader, criterion, device, *, task, t, m, max_batches=None):
     """
     Evaluation for stacked and collective predictions. 
     For classification, returns collective accuracy and inter-agent agreement (% in plurality).
@@ -209,7 +271,8 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
     (entropy), for both next row (m-dimensional) and outcome (1-dimensional).
     """
     model.eval()
-    aggregator.eval()
+    if aggregator is not None:
+        aggregator.eval()
     autocast_ctx = autocast(device_type='cuda') if device.type == 'cuda' else nullcontext()
     
     total_loss = 0.0
@@ -227,12 +290,20 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
         if max_batches is not None and i >= max_batches:
             break
 
-        x = batch['matrix'].to(device, non_blocking=True)  # shape: [B, t * m]
-        target = batch['label'].to(device, non_blocking=True)  # shape: [B] or [B, m + y_dim]
+        if isinstance(model, DynamicDotGAT):
+            x_btm = _btm_from_batch(batch, t, m, device)
+            target = _bty_labels_from_batch(batch, t, device)
+            B = target.size(0)
+            with autocast_ctx:
+                h, logits = model(x_btm)
+                loss = criterion(logits, target, reduction ='mean')
+        else:
+            x = batch['matrix'].to(device, non_blocking=True)  # shape: [B, t * m]
+            target = batch['label'].to(device, non_blocking=True)  # shape: [B] or [B, y_dim]
 
-        with autocast_ctx:
-            logits = aggregator(model(x))          # [B, A, C] or [B, A, m + y_dim]
-            loss = criterion(logits, target, reduction='mean')
+            with autocast_ctx:
+                logits = aggregator(model(x)) # [B, A, C] or [B, A, y_dim]
+                loss = criterion(logits, target, reduction='mean')
             
         B = target.size(0)
         total_loss += loss.item() * B
@@ -245,7 +316,7 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, max_batches=
             total_acc += batch_acc
             total_agree += batch_agree
         else:
-            B, m = target.shape
+            #B,y or B,t,y target
             batch_mse, batch_diversity = regression_acc_agree(logits, target)
             total_mse += batch_mse
             total_diversity += batch_diversity
@@ -390,7 +461,8 @@ def baseline_classif(dataloader, globalmask, t: int, m: int):
 def final_test(model, aggregator, test_loader, globalmask, criterion, device, task_cat, cfg):
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
-            model, aggregator, test_loader, criterion, device, task=task_cat
+            model, aggregator, test_loader, criterion, device, task=task_cat,
+            t=cfg.t, m=cfg.m
         )
         test_stats = (test_loss, test_acc, test_agree)
         print("Test Set Performance | ",
@@ -400,10 +472,12 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, device, ta
             cfg.t, cfg.m
         )
         print(f"Accuracy for naive prediction on test set, full info: {naive_full:.2f}")
-        print(f"Accuracy for naive prediction on test set, partial info: {naive_partial:.2f}")
+        if cfg.memory is False:
+            print(f"Accuracy for naive prediction on test set, partial info: {naive_partial:.2f}")
     else:
         test_loss, test_mse, test_diversity = evaluate(   # type: ignore
-            model, aggregator, test_loader, criterion, device, task=task_cat
+            model, aggregator, test_loader, criterion, device, task=task_cat,
+            t=cfg.t, m=cfg.m
         )
         test_stats = (test_loss, test_mse, test_diversity)
         print("Test Set Performance | ",
@@ -414,5 +488,6 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, device, ta
             cfg.t, cfg.m
         )
         print(f"MSE for naive prediction on test set, full info: {naive_full:.4f}")
-        print(f"MSE for naive prediction on test set, partial info: {naive_partial:.4f}")
+        if cfg.memory is False:
+            print(f"MSE for naive prediction on test set, partial info: {naive_partial:.4f}")
     return test_stats

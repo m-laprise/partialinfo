@@ -52,7 +52,7 @@ if __name__ == "__main__":
     
     if cfg.task == 'argmax':
         task_cat = 'classif'
-    elif cfg.task == 'nextrow':
+    elif cfg.task in ['nextrow', 'nonlin_function']:
         task_cat = 'regression'
     else:
         raise NotImplementedError(f"Task {cfg.task} not implemented")
@@ -67,15 +67,19 @@ if __name__ == "__main__":
     
     # SETUP DATA
     train_loader, val_loader, test_loader, sensingmasks = create_data(cfg)
+    if cfg.memory is True:
+        globalmask = torch.ones(cfg.t * cfg.m, dtype=torch.bool, device=device)
+    else:
+        globalmask = sensingmasks.global_known      # type: ignore
     
     # SETUP MODEL
     model, aggregator = setup_model(cfg, sensingmasks, device, task_cat)
     count_parameters(model)
-    count_parameters(aggregator)
+    count_parameters(aggregator) if aggregator is not None else None
     print("--------------------------")
     
     model = model.to(device)
-    aggregator = aggregator.to(device)
+    aggregator = aggregator.to(device) if aggregator is not None else None
     
     if torch.cuda.is_available():
         print("Compiling model and aggregator with torch.compile...")  
@@ -84,9 +88,12 @@ if __name__ == "__main__":
         print("torch.compile done.")
     
     # SET UP TRAINING
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(aggregator.parameters()), lr=cfg.lr
-    )
+    if aggregator is None:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    else:
+        optimizer = torch.optim.AdamW(
+            list(model.parameters()) + list(aggregator.parameters()), lr=cfg.lr # type: ignore
+        )
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=1e-6)
     scaler = GradScaler(enabled=(device.type == 'cuda'))
     criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
@@ -108,20 +115,18 @@ if __name__ == "__main__":
     
     if task_cat == 'classif':
         naive_partial_val, naive_full_val = baseline_classif(
-            val_loader, 
-            sensingmasks.global_known, 
-            cfg.t, cfg.m
+            val_loader, globalmask, cfg.t, cfg.m
         )
         print(f"Accuracy for naive prediction on val set with full information: {naive_full_val:.2f}")
-        print(f"Accuracy for naive prediction on val set with partial information: {naive_partial_val:.2f}")
+        if cfg.memory is False:
+            print(f"Accuracy for naive prediction on val set with partial information: {naive_partial_val:.2f}")
     else:
         naive_partial_val, naive_full_val = baseline_mse_m(
-            val_loader, 
-            sensingmasks.global_known, 
-            cfg.t, cfg.m
+            val_loader, globalmask, cfg.t, cfg.m
         )
         print(f"MSE for naive prediction on val set with full information: {naive_full_val:.4f}")
-        print(f"MSE for naive prediction on val set with partial information: {naive_partial_val:.4f}")
+        if cfg.memory is False:
+            print(f"MSE for naive prediction on val set with partial information: {naive_partial_val:.4f}")
 
     # PRINT TIME
     start = datetime.now()
@@ -132,14 +137,14 @@ if __name__ == "__main__":
     # TRAINING LOOP
     for epoch in range(1, cfg.epochs + 1):
         # TRAIN
-        train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler)
+        train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler, t=cfg.t, m=cfg.m)
         scheduler.step()
         stats["train_loss"].append(train_loss)
         
         # EVALUATE
         keyset = METRIC_KEYS["classif"] if task_cat == "classif" else METRIC_KEYS["regression"]
-        train_eval = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat)
-        val_eval   = evaluate(model, aggregator, val_loader,   criterion, device, task=task_cat)
+        train_eval = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat, t=cfg.t, m=cfg.m)
+        val_eval   = evaluate(model, aggregator, val_loader,   criterion, device, task=task_cat, t=cfg.t, m=cfg.m)
         train_metrics = pack_metrics(train_eval, keyset)
         val_metrics   = pack_metrics(val_eval,   keyset)
         for metric_name in keyset:
@@ -204,9 +209,10 @@ if __name__ == "__main__":
     if os.path.exists(checkpoint_path):
         state = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(state["model"])
-        aggregator.load_state_dict(state["aggregator"])
         model.to(device)
-        aggregator.to(device)
+        if aggregator is not None:
+            aggregator.load_state_dict(state["aggregator"])
+            aggregator.to(device)
         print(f"Loaded best model (epoch {state['epoch']}) from checkpoint.")
     else:
         print("No checkpoint found; using current in-memory weights.")
@@ -219,7 +225,7 @@ if __name__ == "__main__":
         plot_regression(stats, file_base, naive_full_val, naive_partial_val)
     
     # EVALUATE ON TEST DATA
-    test_stats = final_test(model, aggregator, test_loader, sensingmasks.global_known,
+    test_stats = final_test(model, aggregator, test_loader, globalmask,
                             criterion, device, task_cat, cfg)
 
     # SAVE LOGS

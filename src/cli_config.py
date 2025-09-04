@@ -44,6 +44,12 @@ class Config:
         metadata={"help": "Agents share a V embedding matrix (use --no-sharedv to disable)"})
     
     # Message passing hyperparameters
+    memory: bool = field(
+        default=True,
+        metadata={
+            "help": "Dynamic version where agents with memory process rows one by one (use --no-memory to disable)"
+        }
+    )
     att_heads: int = field(default=4, metadata={"help": "Number of attention heads"})
     adjacency_mode: str = field(
         default="learned", 

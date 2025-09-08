@@ -386,9 +386,8 @@ class TemporalData(Dataset):
             k = int(round(self.rho_out * self.m))
             k = max(1, min(k, self.m))
             sel_mask = torch.zeros(self.t, self.m, dtype=torch.bool)
-            for r_ in range(self.t):
-                cols = torch.randperm(self.m)[:k]
-                sel_mask[r_, cols] = True
+            cols = torch.randperm(self.m)[:k]
+            sel_mask[:, cols] = True
             self._row_sel_mask = sel_mask
         
         self.verbose = verbose

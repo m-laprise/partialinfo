@@ -126,7 +126,7 @@ if __name__ == "__main__":
             print(f"Accuracy for naive prediction on val set with partial information: {naive_partial_val:.2f}")
     else:
         naive_partial_val, naive_full_val = baseline_mse_m(
-            val_loader, globalmask, cfg.t, cfg.m
+            val_loader, globalmask, cfg.t, cfg.m, cfg.task
         )
         print(f"MSE for naive prediction on val set with full information: {naive_full_val:.4f}")
         if cfg.memory is False:

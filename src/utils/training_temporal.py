@@ -380,7 +380,7 @@ def _last_nonzero_per_col(A: torch.Tensor,
     return values
 
 
-def baseline_mse_m(dataloader, globalmask, t, m, reduction = 'mean'):
+def baseline_mse_m(dataloader, globalmask, t, m, task, reduction = 'mean'):
     """
     Returns the naive baseline with partial and full information.
     Naive means predicting x_{t + 1} = x_{t}.
@@ -395,18 +395,38 @@ def baseline_mse_m(dataloader, globalmask, t, m, reduction = 'mean'):
     total_examples = 0
     for batch in dataloader:
         x = batch['matrix']
+        targets = batch['label']
+        
         B, _, _ = x.shape
         x = x.view(B, t, m)
-        targets = x[:, -1, :]
-        
-        predictions_full = x[:, -2, :]
-        mse_full = nn.MSELoss(reduction=reduction)(predictions_full, targets)
-        total_mse_full += mse_full.item() * B
         
         globalmask = globalmask.view(t, m)
         masked_x = torch.zeros_like(x)
         masked_x[:, globalmask] = x[:, globalmask]
-        predictions_partial = _last_nonzero_per_col(masked_x, globalmask, default=0.0)
+        
+        if task == 'lastrow':
+            # targets = x[:, -1, :]
+            predictions_full = x[:, -2, :]
+            predictions_partial = _last_nonzero_per_col(masked_x, globalmask, default=0.0)
+        
+        elif task == 'nextrow':
+            # targets = x[:, :-1, :]
+            predictions_full = x[:, 1:, :]
+            predictions_partial = torch.zeros_like(predictions_full)
+            for row in range(t - 1):
+                seen_at_t = masked_x[:, :row + 1, :]
+                predictions_partial[:, row, :] = _last_nonzero_per_col(
+                    seen_at_t, globalmask[:row + 1, :], default=0.0
+                )
+        elif task == 'nonlin_function':
+            targets = targets.squeeze()[:, 1:-1] # For steps t=0 to T-1, the target is y(t+1)
+            predictions_full = predictions_partial = targets[:, 1:] # and the prediction is y(t)
+        else:
+            raise NotImplementedError
+        
+        mse_full = nn.MSELoss(reduction=reduction)(predictions_full, targets)
+        total_mse_full += mse_full.item() * B
+            
         mse_partial = nn.MSELoss(reduction=reduction)(predictions_partial, targets)
         total_mse_partial += mse_partial.item() * B
         
@@ -485,7 +505,7 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, device, ta
         
         naive_partial, naive_full = baseline_mse_m(
             test_loader, globalmask,
-            cfg.t, cfg.m
+            cfg.t, cfg.m, cfg.task
         )
         print(f"MSE for naive prediction on test set, full info: {naive_full:.4f}")
         if cfg.memory is False:

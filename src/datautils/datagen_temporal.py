@@ -413,7 +413,6 @@ class TemporalData(Dataset):
             if t > 1:
                 prev_rows = matrix[:-1, :]          # [T-1, M]
                 # Apply per-row selection mask on previous rows
-                # THIS MEANS THAT the function takes different cols as input for each row... how are they supposed to learn this?
                 row_mask = self._row_sel_mask[:-1, :].to(device=matrix.device)
                 prev_rows_masked = prev_rows * row_mask.to(dtype=prev_rows.dtype)
                 w = self.W_out.to(device=matrix.device, dtype=prev_rows.dtype)

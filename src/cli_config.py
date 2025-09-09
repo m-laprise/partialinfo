@@ -28,7 +28,7 @@ class Config:
     # Task and sensing hyperparameters
     task: str = field(
         default="nonlin_function", 
-        metadata={"choices": ["argmax", "lastrow", "nextrow", "nonlinear_seq", "nonlin_function"], 
+        metadata={"choices": ["argmax", "lastrow", "nextrow", "nonlin_function"], 
                   "help": "Prediction task: argmax (classification), nextrow (regression), or nonlin_function (timewise regression)"})
     density: float = field(default=0.5, metadata={"help": "Target proportion of known entries"})
     num_agents: int = field(default=20, metadata={"help": "Number of agents"})

@@ -419,8 +419,10 @@ def baseline_mse_m(dataloader, globalmask, t, m, task, reduction = 'mean'):
                     seen_at_t, globalmask[:row + 1, :], default=0.0
                 )
         elif task == 'nonlin_function':
-            targets = targets.squeeze()[:, 1:-1] # For steps t=0 to T-1, the target is y(t+1)
-            predictions_full = predictions_partial = targets[:, 1:] # and the prediction is y(t)
+            targets = targets.squeeze() 
+            predictions_full = predictions_partial = torch.concat(
+                [torch.zeros(B, 1), targets[:, :-1]], dim=1
+            ) # and the prediction is y(t)
         else:
             raise NotImplementedError
         

@@ -110,10 +110,10 @@ def plot_regression(stats, filename_base, naive_full, naive_partial):
                 label="Val Loss (all agents)", color='tab:orange')
     axs[0].plot(epochs, np.log(stats["val_mse"]), 
                 label="Val MSE (collective pred.)", color='tab:green', linestyle='--')
-    axs[0].axhline(y=naive_partial,
+    axs[0].axhline(y=np.log(naive_partial),
                    label="Naive pred., partial info", 
                    color='tab:red', linestyle='dotted')
-    axs[0].axhline(y=naive_full,
+    axs[0].axhline(y=np.log(naive_full),
                    label="Naive pred., full info", 
                    color='tab:purple', linestyle='dotted')
     axs[0].set_title("Average of prediction error (training loss)\nand error of average prediction")

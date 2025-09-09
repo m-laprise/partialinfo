@@ -12,11 +12,15 @@ from dotGAT import DynamicDotGAT
 
 def _btm_from_batch(batch, t: int, m: int, device: torch.device) -> torch.Tensor:
     x = batch['matrix'].to(device, non_blocking=True)
+    # if next row prediction task, remove last row from x
     if x.dim() == 2 and x.shape[1] == t * m:
         return x.view(-1, t, m)
     if x.dim() == 3 and x.shape[-1] == t * m:
         B = x.shape[0]
-        return x.view(B, t, m)
+        x = x.view(B, t, m)
+        if batch['label'].shape[1] == (t - 1):
+            x = x[:, :-1, :]
+        return x
     if x.dim() == 3 and x.shape[1:] == (t, m):
         return x
     raise ValueError(f"Unexpected matrix shape {tuple(x.shape)}; expected [B,t*m], [B,1,t*m], or [B,t,m]")
@@ -25,6 +29,8 @@ def _btm_from_batch(batch, t: int, m: int, device: torch.device) -> torch.Tensor
 def _bty_labels_from_batch(batch, t: int, device: torch.device) -> torch.Tensor:
     y = batch['label'].to(device, non_blocking=True)  # [B,T,y_dim]
     if y.dim() == 3 and y.shape[1] == t:
+        return y
+    elif y.dim() == 3 and y.shape[1] == (t - 1):
         return y
     raise ValueError(f"Unexpected label shape {tuple(y.shape)}; expected [B,T,y_dim]")
 
@@ -150,11 +156,11 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
         optimizer.zero_grad(set_to_none=True)
 
         if hasattr(model, "W_q_mem"):
-            x_btm = _btm_from_batch(batch, t, m, device)           # [B,T,M]
+            x_btm = _btm_from_batch(batch, t, m, device)        # [B,T,M]
             target = _bty_labels_from_batch(batch, t, device)       # [B,T,y_dim]
             B = target.size(0)
             with autocast_ctx:
-                h, y_btay = model(x_btm)        # y: [B,T,A,y_dim]
+                _, y_btay = model(x_btm)        # y: [B,T,A,y_dim]
                 loss = criterion(y_btay, target, reduction ='mean')
         else:
             x = batch['matrix'].to(device, non_blocking=True)       # [batch_size, t * m]
@@ -410,8 +416,7 @@ def baseline_mse_m(dataloader, globalmask, t, m, task, reduction = 'mean'):
             predictions_partial = _last_nonzero_per_col(masked_x, globalmask, default=0.0)
         
         elif task == 'nextrow':
-            # targets = x[:, :-1, :]
-            predictions_full = x[:, 1:, :]
+            predictions_full = x[:, :-1, :]
             predictions_partial = torch.zeros_like(predictions_full)
             for row in range(t - 1):
                 seen_at_t = masked_x[:, :row + 1, :]

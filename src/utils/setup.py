@@ -77,6 +77,8 @@ def setup_model(args, sensingmasks, device, task_cat):
             y_dim = 1
         elif args.task == 'lastrow':
             y_dim = args.m
+        elif args.task == 'nextrow':
+            y_dim = (args.t - 1, args.m)
         else:
             raise NotImplementedError(f"Task {args.task} not implemented for memory network")
 

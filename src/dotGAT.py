@@ -5,7 +5,7 @@ to check with profiling.
 """
 
 import math
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import networkx as nx
 import torch
@@ -463,7 +463,7 @@ class DynamicDotGAT(nn.Module):
         p: float = 0.0,
         freeze_zero_frac: float = 1.0,
         sensing_masks_temporal: Optional[object] = None,  # SensingMasksTemporal
-        y_dim: Optional[int] = None,
+        y_dim: Optional[Union[int, Tuple[int, int]]] = None,
     ) -> None:
         super().__init__()
         assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
@@ -476,7 +476,14 @@ class DynamicDotGAT(nn.Module):
         self.dropout = float(dropout)
         self.adjacency_mode = adjacency_mode
         self.sharedV = bool(sharedV)
-        self.y_dim = int(y_dim) if y_dim is not None else None
+        #self.y_dim = int(y_dim) if y_dim is not None else None
+        if y_dim is not None:
+            if isinstance(y_dim, tuple):
+                self.y_dim, self.tm1 = y_dim[1], y_dim[0]
+            else:
+                self.y_dim = y_dim
+        else:
+            self.y_dim = None
         self.device_ref = device
 
         # Optional temporal sensing masks (per-agent column masks) -> [A, M]

@@ -322,9 +322,14 @@ class GTMatrices(Dataset):
         return Us, Vs, vcovsUs
 
     def generate_matrices(self, idx = None):
-        if self.U_only:
-            return self.U[idx]
         idx = np.arange(self.U.shape[0]) if idx is None else idx
+        
+        if self.U_only:
+            U = self.U[idx]
+            for i in range(U.shape[0]):
+                U[i] /= U[i].std(dim=0)
+            return U
+        
         M = torch.einsum('...ij,...kj->...ik', self.U[idx], self.V[idx])
         #M += self.sigma * torch.randn(M.shape, dtype=torch.float32)
         if not self.structured:
@@ -334,8 +339,8 @@ class GTMatrices(Dataset):
             M_r = _fin_return(M[:, :-1, :], M[:, 1:, :])
             return M_r / M_r.std(dim=1, keepdim=True)
         else:
-            for idx in range(M.shape[0]):
-                M[idx] /= M[idx].std(dim=0)
+            for i in range(M.shape[0]):
+                M[i] /= M[i].std(dim=0)
             return M
         
     def __getitem__(self, idx):

@@ -53,7 +53,7 @@ class Config:
     att_heads: int = field(default=4, metadata={"help": "Number of attention heads"})
     adjacency_mode: str = field(
         default="learned", 
-        metadata={"choices": ["none", "learned"], "help": "Adjacency mode (all-to-all or learned)"})
+        metadata={"choices": ["all", "socnet"], "help": "Adjacency mode (all-to-all or social network)"})
     nb_ties: int = field(default=4, metadata={"help": "Number of ties per agent"})
     steps: int = field(default=5, metadata={"help": "Number of message passing steps"})
 

@@ -217,7 +217,7 @@ class DistributedDotGAT(nn.Module):
             self.attnorm = nn.RMSNorm(self.d_hidden)
             self.mlpnorm = nn.RMSNorm(self.d_hidden)
             
-            if adjacency_mode == 'learned':
+            if self.message_steps > 0 and self.n_agents > 1 and self.adjacency_mode == 'socnet':
                 self.connect = TrainableSmallWorld(self.n_agents, device, k=min(k, self.n_agents - 1), 
                                                    p=p, freeze_frac=freeze_zero_frac)
         
@@ -252,7 +252,7 @@ class DistributedDotGAT(nn.Module):
         return h
     
     def _message_passing(self, h: torch.Tensor) -> torch.Tensor:
-        if self.adjacency_mode == 'learned':
+        if self.adjacency_mode == 'socnet':
             attn_bias = self.connect()
         else:
             attn_bias = None
@@ -457,7 +457,7 @@ class DynamicDotGAT(nn.Module):
         num_heads: int = 4,
         message_steps: int = 1,
         dropout: float = 0.0,
-        adjacency_mode: str = 'learned',
+        adjacency_mode: str = 'socnet',
         sharedV: bool = False,
         k: int = 4,
         p: float = 0.0,
@@ -513,8 +513,8 @@ class DynamicDotGAT(nn.Module):
         else:
             self.W_v_soc = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
 
-        # Optional learned connectivity bias between agents
-        if self.message_steps > 0 and self.n_agents > 1 and self.adjacency_mode == 'learned':
+        # Optional connectivity bias between agents
+        if self.message_steps > 0 and self.n_agents > 1 and self.adjacency_mode == 'socnet':
             self.connect = TrainableSmallWorld(
                 self.n_agents, device,
                 k=min(k, max(1, self.n_agents - 1)), p=p, freeze_frac=freeze_zero_frac
@@ -643,7 +643,7 @@ class DynamicDotGAT(nn.Module):
         v = v.view(B * T, self.heads, A, self.head_dim)
 
         attn_bias = None
-        if hasattr(self, 'connect') and self.adjacency_mode == 'learned':
+        if hasattr(self, 'connect') and self.adjacency_mode == 'socnet':
             attn_bias = self.connect()  # [1, A, A]
             attn_bias = attn_bias.to(device=q.device, dtype=q.dtype).unsqueeze(1)  # [1, 1, A, A]
 

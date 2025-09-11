@@ -7,8 +7,6 @@ import torch.nn as nn
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
-from dotGAT import DynamicDotGAT
-
 
 def _btm_from_batch(batch, t: int, m: int, device: torch.device) -> torch.Tensor:
     x = batch['matrix'].to(device, non_blocking=True)
@@ -76,9 +74,6 @@ def stacked_cross_entropy_loss(logits: torch.Tensor,
         return losses
     else:
         raise ValueError(f"Invalid reduction type: {reduction}")
-    
-
-import torch
 
 
 def stacked_MSE(predictions: torch.Tensor,
@@ -156,15 +151,15 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
         optimizer.zero_grad(set_to_none=True)
 
         if hasattr(model, "W_q_mem"):
-            x_btm = _btm_from_batch(batch, t, m, device)        # [B,T,M]
-            target = _bty_labels_from_batch(batch, t, device)       # [B,T,y_dim]
+            x_btm = _btm_from_batch(batch, t, m, device)          # [B, T, M]
+            target = _bty_labels_from_batch(batch, t, device)     # [B, T, y_dim]
             B = target.size(0)
             with autocast_ctx:
-                _, y_btay = model(x_btm)        # y: [B,T,A,y_dim]
+                _, y_btay = model(x_btm)                          # y: [B, T, A, y_dim]
                 loss = criterion(y_btay, target, reduction ='mean')
         else:
-            x = batch['matrix'].to(device, non_blocking=True)       # [batch_size, t * m]
-            target = batch['label'].to(device, non_blocking=True)   # [batch_size]
+            x = batch['matrix'].to(device, non_blocking=True)     # [B, T * M]
+            target = batch['label'].to(device, non_blocking=True) # [B]
             B = target.size(0)
             with autocast_ctx:
                 logits = aggregator(model(x))

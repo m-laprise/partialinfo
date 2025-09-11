@@ -78,6 +78,9 @@ if __name__ == "__main__":
     train_loader, val_loader, test_loader, sensingmasks = create_data(cfg)
     if cfg.memory is True:
         globalmask = torch.ones(cfg.t * cfg.m, dtype=torch.bool)
+        agentviews_per_col = torch.sum(sensingmasks.col_masks, dim=0) # type: ignore
+        if any(agentviews_per_col == 0):
+            print(f"WARNING: {sum(agentviews_per_col == 0)} COLUMN(S) HIDDEN FROM ALL AGENTS.")
     else:
         globalmask = sensingmasks.global_known      # type: ignore
     
@@ -147,7 +150,9 @@ if __name__ == "__main__":
     # TRAINING LOOP
     for epoch in range(1, cfg.epochs + 1):
         # TRAIN
-        train_loss = train(model, aggregator, train_loader, optimizer, criterion, device, scaler, t=cfg.t, m=cfg.m)
+        train_loss = train(
+            model, aggregator, train_loader, optimizer, criterion, device, scaler, t=cfg.t, m=cfg.m
+        )
         scheduler.step()
         stats["train_loss"].append(train_loss)
         

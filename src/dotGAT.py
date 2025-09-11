@@ -475,7 +475,7 @@ class DynamicDotGAT(nn.Module):
         k: int = 4,
         p: float = 0.0,
         freeze_zero_frac: float = 1.0,
-        sensing_masks_temporal: Optional[object] = None,  # SensingMasksTemporal
+        sensing_masks_temporal: Optional[object] = None, 
         y_dim: Optional[Union[int, Tuple[int, int]]] = None,
     ) -> None:
         super().__init__()
@@ -485,13 +485,13 @@ class DynamicDotGAT(nn.Module):
         self.d_hidden = int(hidden_dim)
         self.heads = int(num_heads)
         self.head_dim = self.d_hidden // self.heads
-        self.message_steps = int(message_steps)
+        self.message_steps = int(message_steps) if self.n_agents > 1 else 1
         self.dropout = float(dropout)
         self.adjacency_mode = adjacency_mode
         self.sharedV = bool(sharedV)
         if y_dim is not None:
             if isinstance(y_dim, tuple):
-                self.y_dim, self.tm1 = y_dim[1], y_dim[0]
+                _, self.y_dim = y_dim
             else:
                 self.y_dim = y_dim
         else:
@@ -508,7 +508,7 @@ class DynamicDotGAT(nn.Module):
         else:
             self.register_buffer("agent_col_masks", torch.empty(0, dtype=torch.bool))
 
-        # Per-agent row embedding: [A, M, H]
+        # Per-agent row embedding
         self.W_embed = nn.Parameter(torch.empty(self.n_agents, self.m, self.d_hidden))
 
         # Memory attention (causal across time) per agent
@@ -618,7 +618,7 @@ class DynamicDotGAT(nn.Module):
         q = q.view(B, T, A, self.heads, self.head_dim).permute(0, 2, 3, 1, 4).contiguous()
         k = k.view(B, T, A, self.heads, self.head_dim).permute(0, 2, 3, 1, 4).contiguous()
         v = v.view(B, T, A, self.heads, self.head_dim).permute(0, 2, 3, 1, 4).contiguous()
-        q = q.view(B * A, self.heads, T, self.head_dim)
+        q = q.view(B * A, self.heads, T, self.head_dim)  # [B * A, heads, T, Dh]
         k = k.view(B * A, self.heads, T, self.head_dim)
         v = v.view(B * A, self.heads, T, self.head_dim)
 
@@ -630,8 +630,8 @@ class DynamicDotGAT(nn.Module):
         else:
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
 
-        # Back to [B, T, A, H]
-        out = out.view(B, A, self.heads, T, self.head_dim).permute(0, 3, 1, 2, 4).contiguous()
+        # Back to [B, T, A, H] from [B*A, heads, T, Dh]
+        out = out.view(B, A, self.heads, T, self.head_dim).permute(0, 3, 1, 2, 4).contiguous()  # [B, T, A, heads, Dh]
         out = out.view(B, T, A, H)
         return out
 
@@ -657,8 +657,8 @@ class DynamicDotGAT(nn.Module):
 
         attn_bias = None
         if hasattr(self, 'connect') and self.adjacency_mode == 'socnet':
-            attn_bias = self.connect()  # [1, A, A]
-            attn_bias = attn_bias.to(device=q.device, dtype=q.dtype).unsqueeze(1)  # [1, 1, A, A]
+            attn_bias = self.connect() # [1, A, A]
+            attn_bias = attn_bias.to(device=q.device, dtype=q.dtype).unsqueeze(1) # [1, 1, A, A]
 
         dropout_p = self.dropout if self.training else 0.0
         if q.is_cuda:
@@ -672,7 +672,7 @@ class DynamicDotGAT(nn.Module):
                 q, k, v, attn_mask=attn_bias, dropout_p=dropout_p, is_causal=False
             )
 
-        out = out.view(B, T, self.heads, A, self.head_dim).permute(0, 1, 3, 2, 4).contiguous()
+        out = out.view(B, T, self.heads, A, self.head_dim).permute(0, 1, 3, 2, 4).contiguous() # [B, T, A, heads, Dh]
         out = out.view(B, T, A, H)
         return out
 
@@ -680,20 +680,20 @@ class DynamicDotGAT(nn.Module):
         """Ensure inputs are [B, A, T, M], applying per-agent column masks if needed.
         Accepts [B, T, M], [T, M], [B, A, T, M], or [A, T, M].
         """
-        if X.dim() == 3:  # [B, T, M]
+        if X.dim() == 3:  # [B, T, M] -- This is the normal case in `main_temporal.py`
             assert self.smt_available, "Provide SensingMasksTemporal or pass [B, A, T, M] inputs."
             B, T, M = X.shape
             assert M == self.m, f"Expected last dim M={self.m}, got {M}"
-            col_masks = self.agent_col_masks.to(device=X.device)  # [A, M]
-            X_BA_tm = X.unsqueeze(1).repeat(1, self.n_agents, 1, 1)  # [B, A, T, M]
-            return X_BA_tm * col_masks[None, :, None, :] # type: ignore
+            col_masks = self.agent_col_masks  # [A, M]
+            return X.unsqueeze(1) * col_masks[None, :, None, :] # [B, A, T, M]  # type: ignore
         elif X.dim() == 2:  # [T, M]
             assert self.smt_available, "Provide SensingMasksTemporal or pass [A, T, M] inputs."
             T, M = X.shape
             assert M == self.m
-            col_masks = self.agent_col_masks.to(device=X.device)
-            X_A_tm = X.unsqueeze(0).repeat(self.n_agents, 1, 1)  # [A, T, M]
-            return (X_A_tm * col_masks[:, None, :]).unsqueeze(0)  # [1, A, T, M] # type: ignore
+            col_masks = self.agent_col_masks
+            X_A_tm = X.unsqueeze(0)  # shape [1, T, M]
+            X_A_tm = X_A_tm * col_masks[:, None, :]   # broadcasts to [A, T, M] # type: ignore
+            return X_A_tm.unsqueeze(0)  # [1, A, T, M]
         elif X.dim() == 4 and X.shape[1] == self.n_agents:  # [B, A, T, M]
             assert X.shape[-1] == self.m
             return X
@@ -705,7 +705,7 @@ class DynamicDotGAT(nn.Module):
 
     def forward(self, X: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Forward through K message passing steps with memory and social attentions.
+        Forward through K message passing steps with memory and social attention; vectorized over time.
 
         Args:
             X: inputs with shapes [B, T, M] (will be masked using SensingMasksTemporal)
@@ -715,7 +715,7 @@ class DynamicDotGAT(nn.Module):
             h: final hidden states [B, T, A, H]
             y: optional per-timestep predictions [B, T, A, y_dim] if y_dim was provided
         """
-        # Prepare [B, A, T, M]
+        # Prepare [B, A, T, M] from [B, T, M]
         X = self._maybe_mask_inputs(X)
         B, A, T, M = X.shape
         assert A == self.n_agents and M == self.m
@@ -739,12 +739,13 @@ class DynamicDotGAT(nn.Module):
                 # Feed-forward
                 h_ff = self._apply_mlp(self.mlpnorm(h))
                 h = h + self.drop_mlp(h_ff)
-
+        # NOTE: At this point, h variance can be order 10 instead of 1
         y = None
         if self.y_dim is not None and self.y_dim > 0:
             # Per-agent, per-time predictions
             h_pred = self.prednorm(h) if self.prednorm is not None else h
-            y = torch.einsum('btah,ahy->btay', h_pred, self.W_decode_pred) + self.b_decode_pred.unsqueeze(0).unsqueeze(0)  # type: ignore[arg-type]
+            y = torch.einsum('btah,ahy->btay', h_pred, self.W_decode_pred) + \
+                self.b_decode_pred.unsqueeze(0).unsqueeze(0)  # type: ignore[arg-type]
 
-        return h, y
+        return h, y  # [B, T, A, H], [B, T, A, y_dim]
     

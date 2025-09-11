@@ -50,6 +50,9 @@ if __name__ == "__main__":
 
     print("Effective config:", asdict(cfg))
     
+    if cfg.memory is False and cfg.task in ['nonlin_function', 'nextrow']:
+        raise NotImplementedError(f"Static network not implemented for task {cfg.task}.")
+    
     if cfg.memory is True and cfg.task not in ['nonlin_function', 'nextrow']:
         raise NotImplementedError(f"Memory network not implemented for task {cfg.task}.")
     

@@ -5,7 +5,7 @@ to check with profiling.
 """
 
 import math
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 import networkx as nx
 import torch
@@ -20,6 +20,23 @@ try:
     from datautils.sensing import SensingMasksTemporal  # type: ignore
 except Exception:
     SensingMasksTemporal = None  # noqa: N816
+
+
+def _agent_init(params: torch.Tensor,
+                init: Union[str, Callable],
+                *args, **kwargs) -> None:
+    """
+    Custom in-place initialization of per-agent slices stored in a tensor of shape (n_agents, ...).
+    - `params` must be a parameter tensor whose 0-th dimension indexes agents.
+    - `init` can be a string name (e.g. "kaiming_normal_") or a callable (e.g. nn.init.kaiming_normal_).
+    - Additional args/kwargs are dispatched to the init function.
+    """
+    init_fn = getattr(nn.init, init) if isinstance(init, str) else init
+    with torch.no_grad():
+        # iterate first dimension; call init in-place
+        n = params.size(0)
+        for i in range(n):
+            init_fn(params[i], *args, **kwargs)
 
 
 class DotGATHead(nn.Module):
@@ -55,23 +72,17 @@ class DotGATHead(nn.Module):
         self.reset_parameters()  # initialize weights
     
     def reset_parameters(self):
-        """
-        Custom initialization to make sure each agent's slice [Din, Dout] is initialized like a 
-        normal 2D linear weight
-        """
-        with torch.no_grad():
-            # Note: gain decreases as the a value increases, which narrows the init bounds
-            # gain = √2 / √(1 + a²); bound = gain * (√3 / √fan_mode)
-            a_val = 1.5
-            nonlin = 'leaky_relu'
-            # per-slice, to ignore agent dim
-            for i in range(self.W_q.size(0)):
-                nn.init.xavier_uniform_(self.W_q[i])
-                nn.init.xavier_uniform_(self.W_k[i])
-                if not self.sharedV:
-                    nn.init.kaiming_normal_(self.W_v[i], a=a_val, nonlinearity=nonlin)
-            if self.sharedV:
-                self.W_v_shared.reset_parameters()
+        assert self.W_q.size(0) == self.n_agents and self.W_k.size(0) == self.n_agents
+        # Note: gain decreases as the a value increases, which narrows the init bounds
+        # gain = √2 / √(1 + a²); bound = gain * (√3 / √fan_mode)
+        a_val = 1.5
+        nonlin = 'leaky_relu'
+        _agent_init(self.W_q, "xavier_uniform_")
+        _agent_init(self.W_k, "xavier_uniform_")
+        if not self.sharedV:
+            _agent_init(self.W_v, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
+        else:
+            self.W_v_shared.reset_parameters()
     
     def _project_qkv(self, x: torch.Tensor):
         # x: [B, A, Din]
@@ -237,12 +248,13 @@ class DistributedDotGAT(nn.Module):
         with torch.no_grad():
             a_val = 1.5
             nonlin = 'leaky_relu'
-            for i in range(self.W_embed.size(0)):
-                # dims are reversed so this is actually fan_in
-                nn.init.kaiming_normal_(self.W_embed[i], a=a_val, mode='fan_out', nonlinearity=nonlin)
-                if self.message_steps > 0 and self.n_agents > 1:
-                    nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
-                    nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
+            assert self.W_embed.size(0) == self.n_agents
+            assert self.W_fwd1.size(0) == self.n_agents and self.W_fwd2.size(0) == self.n_agents
+            # dims are reversed so this is actually fan_in
+            _agent_init(self.W_embed, "kaiming_normal_", a=a_val,  mode='fan_out', nonlinearity=nonlin)
+            if self.message_steps > 0 and self.n_agents > 1:
+                _agent_init(self.W_fwd1, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
+                _agent_init(self.W_fwd2, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
         
     def _mlp(self, h: torch.Tensor) -> torch.Tensor:
         # fused forward projection (one GEMM via einsum); broadcast the bias
@@ -356,9 +368,8 @@ class CollectiveClassifier(nn.Module):
         self.reset_parameters()  # initialize weights
     
     def reset_parameters(self):
-        with torch.no_grad():
-            for i in range(self.W_decode.size(0)):
-                nn.init.xavier_uniform_(self.W_decode[i])
+        assert self.W_decode.size(0) == self.n_agents
+        _agent_init(self.W_decode, "xavier_uniform_")
 
     def forward(self, agent_outputs: torch.Tensor) -> torch.Tensor:
         """
@@ -403,11 +414,13 @@ class CollectiveInferPredict(nn.Module):
         self.reset_parameters()  # initialize weights
     
     def reset_parameters(self):
-        with torch.no_grad():
-            for i in range(self.W_decode.size(0)):
-                nn.init.xavier_uniform_(self.W_fwd_H[i])
-                nn.init.xavier_uniform_(self.W_decode[i])
-                nn.init.xavier_uniform_(self.W_predict[i])
+        assert self.W_fwd_H.size(0) == self.n_agents
+        assert self.W_decode.size(0) == self.n_agents
+        assert self.W_predict.size(0) == self.n_agents
+        
+        _agent_init(self.W_fwd_H, "xavier_uniform_")
+        _agent_init(self.W_decode, "xavier_uniform_")
+        _agent_init(self.W_predict, "xavier_uniform_")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -433,10 +446,10 @@ class CollectiveInferPredict(nn.Module):
 
 class DynamicDotGAT(nn.Module):
     """
-    Time-series variant of DistributedDotGAT for a network of agents that exchange messages.
-    Each agent performs two attentions per message step:
+    Time-series variant of DistributedDotGAT for a network of agents exchanging messages.
+    Each agent performs two attention operations per message step:
       1) Memory (temporal) self-attention over its own past states t' <= t (causal).
-      2) Social attention over its neighborhood across agents at the same time t.
+      2) Social attention over its neighborhood across agents at the same time t (including self).
 
     Shapes used inside:
       - Inputs per batch as matrices: [B, T, M] or agent-masked inputs [B, A, T, M].
@@ -476,7 +489,6 @@ class DynamicDotGAT(nn.Module):
         self.dropout = float(dropout)
         self.adjacency_mode = adjacency_mode
         self.sharedV = bool(sharedV)
-        #self.y_dim = int(y_dim) if y_dim is not None else None
         if y_dim is not None:
             if isinstance(y_dim, tuple):
                 self.y_dim, self.tm1 = y_dim[1], y_dim[0]
@@ -486,8 +498,10 @@ class DynamicDotGAT(nn.Module):
             self.y_dim = None
         self.device_ref = device
 
-        # Optional temporal sensing masks (per-agent column masks) -> [A, M]
-        self.smt_available = sensing_masks_temporal is not None and hasattr(sensing_masks_temporal, 'col_masks')
+        # Optional sensing masks (per-agent column masks) -> [A, M]
+        self.smt_available = sensing_masks_temporal is not None and hasattr(
+            sensing_masks_temporal, 'col_masks'
+        )
         if self.smt_available:
             col_masks = sensing_masks_temporal.col_masks  # type: ignore[attr-defined]
             self.register_buffer("agent_col_masks", col_masks.bool())  # [A, M]
@@ -549,38 +563,37 @@ class DynamicDotGAT(nn.Module):
             self.prednorm = None
 
         self.reset_parameters()
-
+    
     def reset_parameters(self) -> None:
-        with torch.no_grad():
-            a_val = 1.5
-            nonlin = 'leaky_relu'
-            # Embedding
-            for i in range(self.W_embed.size(0)):
-                nn.init.kaiming_normal_(self.W_embed[i], a=a_val, mode='fan_out', nonlinearity=nonlin)
-            # Memory projections
-            for i in range(self.n_agents):
-                nn.init.xavier_uniform_(self.W_q_mem[i])
-                nn.init.xavier_uniform_(self.W_k_mem[i])
-                if not self.sharedV:
-                    nn.init.kaiming_normal_(self.W_v_mem[i], a=a_val, nonlinearity=nonlin)
-            if self.sharedV:
-                self.W_v_mem_shared.reset_parameters()
-            # Social projections
-            for i in range(self.n_agents):
-                nn.init.xavier_uniform_(self.W_q_soc[i])
-                nn.init.xavier_uniform_(self.W_k_soc[i])
-                if not self.sharedV:
-                    nn.init.kaiming_normal_(self.W_v_soc[i], a=a_val, nonlinearity=nonlin)
-            if self.sharedV:
-                self.W_v_soc_shared.reset_parameters()
-            # MLP
-            for i in range(self.n_agents):
-                nn.init.kaiming_normal_(self.W_fwd1[i], a=a_val, nonlinearity=nonlin)
-                nn.init.kaiming_normal_(self.W_fwd2[i], a=a_val, nonlinearity=nonlin)
-            # Prediction
-            if self.W_decode_pred is not None:
-                for i in range(self.n_agents):
-                    nn.init.xavier_uniform_(self.W_decode_pred[i])
+        assert self.W_embed.size(0) == self.n_agents
+        assert self.W_fwd1.size(0) == self.n_agents and self.W_fwd2.size(0) == self.n_agents
+        assert self.W_q_mem.size(0) == self.n_agents and self.W_k_mem.size(0) == self.n_agents
+        assert self.W_q_soc.size(0) == self.n_agents and self.W_k_soc.size(0) == self.n_agents
+        
+        a_val = 1.5
+        nonlin = "leaky_relu"
+        # Embedding
+        _agent_init(self.W_embed, "kaiming_normal_", a=a_val, mode="fan_out", nonlinearity=nonlin)
+        # Memory projections
+        _agent_init(self.W_q_mem, "xavier_uniform_")
+        _agent_init(self.W_k_mem, "xavier_uniform_")
+        if not self.sharedV:
+            _agent_init(self.W_v_mem, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
+        else:
+            self.W_v_mem_shared.reset_parameters()
+        # Social projections
+        _agent_init(self.W_q_soc, "xavier_uniform_")
+        _agent_init(self.W_k_soc, "xavier_uniform_")
+        if not self.sharedV:
+            _agent_init(self.W_v_soc, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
+        else:
+            self.W_v_soc_shared.reset_parameters()
+        # MLP
+        _agent_init(self.W_fwd1, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
+        _agent_init(self.W_fwd2, "kaiming_normal_", a=a_val, nonlinearity=nonlin)
+        # Prediction
+        if self.W_decode_pred is not None:
+            _agent_init(self.W_decode_pred, "xavier_uniform_")
 
     def _apply_mlp(self, h: torch.Tensor) -> torch.Tensor:
         # h: [B, T, A, H]

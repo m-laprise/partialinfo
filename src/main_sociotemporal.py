@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from cli_config import Config, build_parser_from_dataclass, load_config
 from datautils.datagen_temporal import GTMatrices, TemporalData
 from datautils.sensing import SensingMasksTemporal
-from dotGAT import DynamicDotGAT
+from dotGAT_optimized import OptimizedDynamicDotGAT as DynamicDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, sequential_split, unique_filename
 
@@ -69,7 +69,7 @@ def create_temporal_loaders(cfg: Config):
             all_data, [cfg.train_n, cfg.val_n, cfg.test_n]
         )
 
-    num_workers = min(os.cpu_count() // 2, 4) if torch.cuda.is_available() else 0  # type: ignore
+    num_workers = min(os.cpu_count() // 2, 8) if torch.cuda.is_available() else 0  # type: ignore
     pin = torch.cuda.is_available()
     persistent = num_workers > 0
     def _dl(ds, shuffle=False):
@@ -80,7 +80,7 @@ def create_temporal_loaders(cfg: Config):
             pin_memory=pin,
             num_workers=num_workers,
             persistent_workers=persistent,
-            prefetch_factor=2 if persistent else None,
+            prefetch_factor=4 if persistent else None,
             drop_last=shuffle,
         )
 
@@ -131,7 +131,7 @@ if __name__ == "__main__":
     print("--------------------------")
     if torch.cuda.is_available():
         print("Compiling model with torch.compile...")
-        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)  # type: ignore
+        model = torch.compile(model, mode='max-autotune', fullgraph=True)  # type: ignore
         print("torch.compile done.")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)

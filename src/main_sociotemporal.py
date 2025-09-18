@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from cli_config import Config, build_parser_from_dataclass, load_config
 from datautils.datagen_temporal import GTMatrices, TemporalData
 from datautils.sensing import SensingMasksTemporal
-from dotGAT_optimized import OptimizedDynamicDotGAT as DynamicDotGAT
+from dotGAT import DynamicDotGAT
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, sequential_split, unique_filename
 

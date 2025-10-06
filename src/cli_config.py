@@ -59,7 +59,7 @@ class Config:
 
     # Training hyperparameters
     dropout: float = field(default=0.1, metadata={"help": "Dropout probability"})
-    theta: float = field(default=0.5, metadata={"help": "Loss function parameter for LRMC"})
+    theta: float = field(default=0.95, metadata={"help": "Loss function parameter for LRMC"})
     lr: float = field(default=0.001, metadata={"help": "Initial learning rate"})
     epochs: int = field(default=50, metadata={"help": "Number of training epochs"})
     batch_size: int = field(default=64, metadata={"help": "Batch size"})

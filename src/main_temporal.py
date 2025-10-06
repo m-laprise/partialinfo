@@ -26,13 +26,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from cli_config import Config, build_parser_from_dataclass, load_config
 from utils.logging import atomic_save, init_stats, log_training_run, printlog, snapshot
 from utils.misc import count_parameters, unique_filename
-from utils.plotting import plot_classif, plot_regression
+from utils.plotting import plot_classif, plot_regression, plot_stats
 from utils.setup import create_data, setup_model
 from utils.training_temporal import (
     baseline_classif,
     baseline_mse_m,
     evaluate,
     final_test,
+    penalized_MSE,
     stacked_cross_entropy_loss,
     stacked_MSE,
     train,
@@ -50,19 +51,28 @@ if __name__ == "__main__":
 
     print("Effective config:", asdict(cfg))
     
-    if cfg.memory is False and cfg.task in ['nonlin_function', 'nextrow']:
-        raise NotImplementedError(f"Static network not implemented for task {cfg.task}.")
+    if cfg.memory is False:
+        if cfg.task in ['nonlin_function', 'nextrow']:
+            raise NotImplementedError(f"Static network not implemented for task {cfg.task}.")
     
-    if cfg.memory is True and cfg.task not in ['nonlin_function', 'nextrow']:
-        raise NotImplementedError(f"Memory network not implemented for task {cfg.task}.")
-    
-    if cfg.memory is True and cfg.task in ['nonlin_function', 'nextrow']:
-        cfg.t = cfg.t + 1
+    if cfg.memory is True:
+        if cfg.task in ['nonlin_function', 'nextrow']:
+            cfg.t = cfg.t + 1
+        else:
+            raise NotImplementedError(f"Memory network not implemented for task {cfg.task}.")
     
     if cfg.task == 'argmax':
         task_cat = 'classif'
     elif cfg.task in ['lastrow', 'nextrow', 'nonlin_function']:
         task_cat = 'regression'
+    elif cfg.task == 'lrmc':
+        task_cat = 'reconstruction'
+        cfg.u_only = False
+        cfg.kernel = "N/A"
+        cfg.vtype = "N/A"
+        cfg.nres = 1
+        if cfg.t != cfg.m:
+            raise ValueError("LRMC task implemented for square matrices only.")
     else:
         raise NotImplementedError(f"Task {cfg.task} not implemented")
 
@@ -75,7 +85,7 @@ if __name__ == "__main__":
         torch.backends.cudnn.benchmark = True
     
     # SETUP DATA
-    train_loader, val_loader, test_loader, sensingmasks = create_data(cfg)
+    train_loader, val_loader, test_loader, sensingmasks, refnuc, refgap, refvar = create_data(cfg)
     if cfg.memory is True:
         globalmask = torch.ones(cfg.t * cfg.m, dtype=torch.bool)
         agentviews_per_col = torch.sum(sensingmasks.col_masks, dim=0) # type: ignore
@@ -109,13 +119,26 @@ if __name__ == "__main__":
         )
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=1e-6)
     scaler = GradScaler(enabled=(device.type == 'cuda'))
-    criterion = stacked_cross_entropy_loss if task_cat == 'classif' else stacked_MSE
+    
+    criterion_kwargs = {}
+    if task_cat == 'classif':
+        criterion = stacked_cross_entropy_loss
+    elif task_cat == 'reconstruction':
+        criterion = penalized_MSE
+        criterion_kwargs['rank'] = cfg.r
+        criterion_kwargs['theta'] = cfg.theta
+    else:
+        criterion = stacked_MSE
     
     # SET UP LOGGING, CHECKPOINTING, AND EARLY STOPPING
     METRIC_KEYS = {
         "classif": ["loss", "accuracy", "agreement"],
         "regression": ["loss", "mse", "diversity"],
-    }
+        "reconstruction": ["loss", "mse_known", "mse_unknown", "variance", 
+                           "penalty", "gap", "nucnorm"]
+    }   
+    keyset = METRIC_KEYS[task_cat]
+    
     def pack_metrics(values_tuple, keys):
         return dict(zip(keys, values_tuple))
     
@@ -133,7 +156,7 @@ if __name__ == "__main__":
         print(f"Accuracy for naive prediction on val set with full information: {naive_full_val:.2f}")
         if cfg.memory is False:
             print(f"Accuracy for naive prediction on val set with partial information: {naive_partial_val:.2f}")
-    else:
+    elif task_cat == 'regression':
         naive_partial_val, naive_full_val = baseline_mse_m(
             val_loader, globalmask, cfg.t, cfg.m, cfg.task
         )
@@ -151,15 +174,17 @@ if __name__ == "__main__":
     for epoch in range(1, cfg.epochs + 1):
         # TRAIN
         train_loss = train(
-            model, aggregator, train_loader, optimizer, criterion, device, scaler, t=cfg.t, m=cfg.m
+            model, aggregator, train_loader, optimizer, criterion, criterion_kwargs, device, scaler, 
+            t=cfg.t, m=cfg.m
         )
         scheduler.step()
         stats["train_loss"].append(train_loss)
         
         # EVALUATE
-        keyset = METRIC_KEYS["classif"] if task_cat == "classif" else METRIC_KEYS["regression"]
-        train_eval = evaluate(model, aggregator, train_loader, criterion, device, task=task_cat, t=cfg.t, m=cfg.m)
-        val_eval   = evaluate(model, aggregator, val_loader,   criterion, device, task=task_cat, t=cfg.t, m=cfg.m)
+        train_eval = evaluate(model, aggregator, train_loader, criterion, criterion_kwargs, device, 
+                              task_cat=task_cat, t=cfg.t, m=cfg.m, global_mask=globalmask)
+        val_eval   = evaluate(model, aggregator, val_loader,   criterion, criterion_kwargs, device, 
+                              task_cat=task_cat, t=cfg.t, m=cfg.m, global_mask=globalmask)
         train_metrics = pack_metrics(train_eval, keyset)
         val_metrics   = pack_metrics(val_eval,   keyset)
         for metric_name in keyset:
@@ -236,12 +261,15 @@ if __name__ == "__main__":
     if task_cat == 'classif':
         random_accuracy = 1.0 / cfg.m
         plot_classif(stats, file_base, random_accuracy, naive_full_val, naive_partial_val)
-    else:
+    elif task_cat == 'regression':
         plot_regression(stats, file_base, naive_full_val, naive_partial_val)
+    elif task_cat == 'reconstruction':
+        # NOTE: reference values are over train, val, and test
+        plot_stats(stats, file_base, refnuc, refgap, refvar)
     
     # EVALUATE ON TEST DATA
     test_stats = final_test(model, aggregator, test_loader, globalmask,
-                            criterion, device, task_cat, cfg)
+                            criterion, criterion_kwargs, device, task_cat, cfg)
 
     # SAVE LOGS
     log_training_run(

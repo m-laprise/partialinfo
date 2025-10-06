@@ -63,14 +63,14 @@ def init_stats(
     return stats
 
 
-def printlog(task, epoch, stats, METRIC_KEYS):
-    if task == 'classif':
+def printlog(task_cat, epoch, stats, METRIC_KEYS):
+    if task_cat == 'classif':
         print(
             f"Ep {epoch:03d}. ",
             f"T loss: {stats['train_loss'][-1]:.2e} | T acc: {stats['t_accuracy'][-1]:.2f} | T % maj: {stats['t_agreement'][-1]:.2f} | ",
             f"V loss: {stats['val_loss'][-1]:.2e} | V acc: {stats['val_accuracy'][-1]:.2f} | V % maj: {stats['val_agreement'][-1]:.2f}"
         )
-    else:
+    elif task_cat == 'regression':
         # Regression: if mse/diversity keys exist, print the rich format; otherwise, fallback to simple losses
         has_mse = 'val_mse' in stats and len(stats['val_mse']) > 0
         has_div = 'val_diversity' in stats and len(stats['val_diversity']) > 0
@@ -85,6 +85,13 @@ def printlog(task, epoch, stats, METRIC_KEYS):
                 f"Ep {epoch:03d}. ",
                 f"T loss: {stats['train_loss'][-1]:.4f} | V loss: {stats['val_loss'][-1]:.4f}"
             )
+    elif task_cat == 'reconstruction':
+        print(
+            f"Ep {epoch:03d}. ",
+            f"T loss: {stats['train_loss'][-1]:.4f} | pnlt: {stats['t_penalty'][-1]:.2f} | kn: {stats['t_mse_known'][-1]:.3f} | unk: {stats['t_mse_unknown'][-1]:.3f} ||",
+            f"V kn: {stats['val_mse_known'][-1]:.4f} | unk: {stats['val_mse_unknown'][-1]:.4f} ||",
+            f"var: {stats['val_variance'][-1]:.2f} | gap: {stats['val_gap'][-1]:.2f} | NN: {stats['val_nucnorm'][-1]:.2f}"
+        )
     pass
 
 
@@ -112,6 +119,8 @@ def log_training_run(
             test_loss = float(test_stats)
             test_mse = float('nan')
             test_diversity = float('nan')
+    elif task_cat == 'reconstruction':
+        test_loss, _, test_mse, test_diversity, _, test_gap, test_nucnorm = test_stats
     else:
         raise NotImplementedError(f"Task {task_cat} not implemented.")
  
@@ -198,7 +207,7 @@ def log_training_run(
                     stats["val_loss"], stats["val_accuracy"], stats["val_agreement"]), 1):
                 f.write(f"{i:5d} | {tl:.2e}   | {ta:.2f}      | {tm:.2f}    | {vl:.2e} | {va:.2f}    | {vm:.2f}\n")
         
-        else:
+        elif task_cat == 'regression':
             if not (torch.isnan(torch.tensor(test_mse)) or torch.isnan(torch.tensor(test_diversity))):
                 f.write(f"Final Test MSE: {test_mse:.2e}\n")
                 f.write(f"Final Test Diversity: {test_diversity:.2f}\n\n")
@@ -219,5 +228,21 @@ def log_training_run(
                 f.write("------|------------|---------\n")
                 for i, (tl, vl) in enumerate(zip(stats["train_loss"], stats["val_loss"]), 1):
                     f.write(f"{i:5d} | {tl:.2e}   | {vl:.2e}\n")
+        elif task_cat == 'reconstruction':
+            f.write(f"Final Test Loss: {test_loss:.2e}\n")
+            f.write(f"Final Test MSE (unknown): {test_mse:.3f}\n")
+            f.write(f"Final Test Diversity: {test_diversity:.2f}\n")
+            f.write(f"Final Test Mean Spectral Gap: {test_gap:.2f}\n")
+            f.write(f"Final Test Mean Nuclear Norm: {test_nucnorm:.2f}\n\n")
+            
+            f.write("Epoch Performance\n")
+            f.write("-----------------\n")
+            f.write("Epoch | Train Loss | Pnlty | kn    | unk   | var  | gap  | NN   | Val unk\n")
+            f.write("------|------------|-------|-------|-------|------|------|------|-------\n")
+            for i, (tl, pn, kn, unk, var, gap, nn, val_unk) in enumerate(
+                zip(stats["train_loss"], stats["t_penalty"], stats["t_mse_known"], stats["t_mse_unknown"],
+                    stats["val_variance"], stats["val_gap"], stats["val_nucnorm"], stats["val_mse_unknown"]), 1
+            ):
+                f.write(f"{i:5d} | {tl:.2e}   | {pn:.2f}  | {kn:.3f} | {unk:.3f} | {var:.2f} | {gap:.2f} | {nn:.2f} | {val_unk:.3f}\n")
 
     print(f"Training log saved to: {log_file}")

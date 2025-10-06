@@ -1,30 +1,38 @@
 import os
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from datautils.datagen_temporal import GTMatrices, TemporalData
 from datautils.sensing import SensingMasks, SensingMasksTemporal
 from dotGAT import (
+    Aggregator,
     CollectiveClassifier,
     CollectiveInferPredict,
     DistributedDotGAT,
     DynamicDotGAT,
+    ReconDecoder,
 )
 from utils.misc import sequential_split
 
 
 def create_data(args):
-    if args.train_n // args.nres == 0:
-        if args.nres != (args.train_n + args.val_n + args.test_n):
-            raise ValueError("One data-generating process will be split between training and validation sets.",
-                            "Set nres to be a divisor of train_n to avoid leakage.")
-    if args.nres == (args.train_n + args.val_n + args.test_n):
-        print("Different realizations of a single data-generating process will be used for training, validation, and test.")
+    if args.task == 'lrmc':
+        structured = False
+    else:
+        structured = True
+        if args.train_n // args.nres == 0:
+            if args.nres != (args.train_n + args.val_n + args.test_n):
+                raise ValueError("One data-generating process will be split between training and validation sets.",
+                                "Set nres to be a divisor of train_n to avoid leakage.")
+        if args.nres == (args.train_n + args.val_n + args.test_n):
+            print("Different realizations of a single data-generating process will be used for training, validation, and test.")
     with torch.no_grad():  
         totN = args.train_n + args.val_n + args.test_n
-        all_GT = GTMatrices(N=totN, t=args.t, m=args.m, r=args.r, 
-                              realizations = args.nres, mode=args.gt_mode, kernel=args.kernel, vtype=args.vtype, U_only=args.u_only)
+        all_GT = GTMatrices(N=totN, t=args.t, m=args.m, r=args.r, structured=structured,
+                            realizations=args.nres, mode=args.gt_mode, 
+                            kernel=args.kernel, vtype=args.vtype, U_only=args.u_only)
         all_data = TemporalData(all_GT, task=args.task, verbose=True)
         if args.memory is True:
             sensingmasks = SensingMasksTemporal(all_data, args.num_agents, args.sensing_rho)
@@ -68,7 +76,13 @@ def create_data(args):
         pin_memory=pin, 
         num_workers=num_workers
     )
-    return train_loader, val_loader, test_loader, sensingmasks
+    
+    return (
+        train_loader, val_loader, test_loader, sensingmasks, 
+        all_data.nuc, all_data.gap, all_data.var
+    )
+
+
 
 
 def setup_model(args, sensingmasks, device, task_cat):
@@ -110,7 +124,29 @@ def setup_model(args, sensingmasks, device, task_cat):
             
         elif task_cat == 'regression':
             aggregator = CollectiveInferPredict(
-                num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, m = args.m, y_dim=1
+                num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, 
+                m=args.m, y_dim=args.m
             )
-    
+        
+        elif task_cat == 'reconstruction':
+            """aggregator = nn.Sequential(
+                ReconDecoder(
+                    hidden_dim=args.hidden_dim,
+                    n=args.t, m=args.m,
+                    num_agents=args.num_agents
+                ),
+                Aggregator(
+                    num_agents=args.num_agents, output_dim=args.t * args.m
+                )
+            )"""
+            #aggregator = ReconDecoder(
+            #    hidden_dim=args.hidden_dim,
+            #    n=args.t, m=args.m,
+            #    num_agents=args.num_agents
+            #)
+            aggregator = CollectiveInferPredict(
+                num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, 
+                m=args.m, y_dim=args.t * args.m
+            )
+        
     return model, aggregator

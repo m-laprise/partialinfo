@@ -131,7 +131,44 @@ def stacked_MSE(predictions: torch.Tensor,
         raise ValueError(f"Expected predictions with 3 dims [B, n_agents, y_dim] or 4 dims [B, time, n_agents, y_dim], got {predictions.shape}")
 
 
-def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optional[GradScaler], *, t, m):
+def spectral_penalty_batched(predictions, rank, eps=1e-6, gamma=1.0):
+    try:
+        # Note about CUDA:
+        # Default is Jacobi (driver = 'gesvdj'); Divide‑and‑Conquer (driver = 'gesvda') also 
+        # possible for tall or thin matrices
+        S = torch.linalg.svdvals(predictions)  # shape: [batch_size, min(n, m)]
+    except RuntimeError:
+        return torch.tensor(0.0, device=predictions.device)
+    # sum of singular values from index 'rank' onward
+    sum_rest = S[:, rank:].sum(dim=1) 
+    s_max = S[:, 0] 
+    N = torch.tensor(min(predictions.shape[1], predictions.shape[2]), 
+                     device=predictions.device, dtype=predictions.dtype)
+
+    soft_upper = torch.relu(s_max - 2 * N)
+    soft_lower = torch.relu((N // 2) - s_max)
+    range_penalty = soft_upper**2 + soft_lower**2 
+
+    penalty = sum_rest / (N - rank) + gamma * range_penalty
+    # spectral gap between rank-th and (rank+1)-th singular value for each sample
+    gap = S[:, rank - 1] - S[:, rank]
+    return penalty.mean(), gap.mean(), S.sum(dim=1).mean().item()
+
+
+def penalized_MSE(predictions: torch.Tensor,
+                  targets: torch.Tensor,
+                  reduction: str = 'mean', *,
+                  rank: int = 1, theta: float = 0.5):
+    B, A, y_dim = predictions.shape
+    # NOTE: to change for rectangular implementation
+    n = int(y_dim ** 0.5)
+    error = stacked_MSE(predictions, targets, reduction=reduction)
+    penalty, _, _ = spectral_penalty_batched(predictions.reshape(B * A, n, n), rank)
+    return theta * error + (1 - theta) * penalty
+
+
+def train(model, aggregator, loader, optimizer, criterion, criterion_kwargs, device, 
+          scaler: Optional[GradScaler], *, t, m):
     model.train()
     if aggregator is not None:
         aggregator.train()
@@ -156,14 +193,14 @@ def train(model, aggregator, loader, optimizer, criterion, device, scaler: Optio
             B = target.size(0)
             with autocast_ctx:
                 _, y_btay = model(x_btm)                          # y: [B, T, A, y_dim]
-                loss = criterion(y_btay, target, reduction ='mean')
+                loss = criterion(y_btay, target, reduction ='mean', **criterion_kwargs)
         else:
             x = batch['matrix'].to(device, non_blocking=True)     # [B, T * M]
             target = batch['label'].to(device, non_blocking=True) # [B]
             B = target.size(0)
             with autocast_ctx:
                 logits = aggregator(model(x))
-                loss = criterion(logits, target, reduction='mean')
+                loss = criterion(logits, target, reduction='mean', **criterion_kwargs)
             
         if use_amp:
             scaler.scale(loss).backward()   # type: ignore
@@ -263,8 +300,35 @@ def regression_acc_agree(logits: torch.Tensor, target: torch.Tensor):
     return batch_mse_sum, batch_variance_sum
 
 
+def recon_acc(preds: torch.Tensor, target: torch.Tensor, globalmask: torch.Tensor, 
+              criterion, criterion_kwargs, device: torch.device):
+    B, A, y_dim = preds.shape
+    
+    # Agent diversity
+    if A == 1:
+        b_variance = 0.0
+    else:
+        var_across_agents = preds.var(dim=-2, unbiased=False)
+        variance_per_example = var_across_agents.flatten(start_dim=1).mean(dim=1)
+        b_variance = float(variance_per_example.sum().item())
+    # Average across agents
+    avg_preds = preds.mean(dim=-2)      # [B, y_dim]
+
+    globalmask = globalmask.expand_as(avg_preds)
+    b_mse_known = nn.MSELoss(reduction='mean')(avg_preds[globalmask], target[globalmask])
+    b_mse_unknown = nn.MSELoss(reduction='mean')(avg_preds[~globalmask], target[~globalmask])
+    
+    # NOTE: change for rectangular implementation
+    n = int(y_dim ** 0.5)
+    b_penalty, b_gap, b_nucnorm = spectral_penalty_batched(
+        avg_preds.view(B, n, n), criterion_kwargs['rank']
+    )
+    return b_mse_known, b_mse_unknown, b_variance, b_penalty, b_gap, b_nucnorm
+
+
 @torch.inference_mode()
-def evaluate(model, aggregator, loader, criterion, device, *, task, t, m, max_batches=None):
+def evaluate(model, aggregator, loader, criterion, criterion_kwargs, device, *, 
+             task_cat, t, m, global_mask, max_batches=None):
     """
     Evaluation for stacked and collective predictions. 
     For classification, returns collective accuracy and inter-agent agreement (% in plurality).
@@ -277,15 +341,23 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, t, m, max_ba
     autocast_ctx = autocast(device_type='cuda') if device.type == 'cuda' else nullcontext()
     
     total_loss = 0.0
-    total_examples = 0
-    if task == 'classif':
+    #total_examples = 0
+    total_batches = 0
+    if task_cat == 'classif':
         total_acc = 0.0
         total_agree = 0.0
-    elif task == 'regression':
+    elif task_cat == 'regression':
         total_mse = 0.0
         total_diversity = 0.0
+    elif task_cat == 'reconstruction':
+        total_mse_known = 0.0
+        total_mse_unknown = 0.0
+        total_variance = 0.0
+        total_gap = 0.0
+        total_nucnorm = 0.0
+        total_penalty = 0.0
     else:
-        raise NotImplementedError(f"Task {task} not implemented")
+        raise NotImplementedError(f"Task {task_cat} not implemented")
 
     for i, batch in enumerate(loader):
         if max_batches is not None and i >= max_batches:
@@ -297,50 +369,80 @@ def evaluate(model, aggregator, loader, criterion, device, *, task, t, m, max_ba
             B = target.size(0)
             with autocast_ctx:
                 h, logits = model(x_btm)
-                loss = criterion(logits, target, reduction ='mean')
+                loss = criterion(logits, target, reduction='mean', **criterion_kwargs)
         else:
             x = batch['matrix'].to(device, non_blocking=True)  # shape: [B, t * m]
             target = batch['label'].to(device, non_blocking=True)  # shape: [B] or [B, y_dim]
 
             with autocast_ctx:
                 logits = aggregator(model(x)) # [B, A, C] or [B, A, y_dim]
-                loss = criterion(logits, target, reduction='mean')
+                loss = criterion(logits, target, reduction='mean', **criterion_kwargs)
             
-        B = target.size(0)
-        total_loss += loss.item() * B
-        total_examples += B
+        #B = target.size(0)
+        total_loss += loss.item() 
+        total_batches += 1
 
-        # Compute % accuracy
-        # Take majority vote
-        if task == 'classif':
+        if task_cat == 'classif':
+            # Compute % accuracy after taking majority vote
             batch_acc, batch_agree = classif_vote_acc_agree(logits, target)
             total_acc += batch_acc
             total_agree += batch_agree
-        else:
+        elif task_cat == 'regression':
             #B,y or B,t,y target
             batch_mse, batch_diversity = regression_acc_agree(logits, target)
             total_mse += batch_mse
             total_diversity += batch_diversity
+        elif task_cat == 'reconstruction':
+            b_mse_known, b_mse_unknown, b_variance, b_penalty, b_gap, b_nucnorm = recon_acc(
+                logits, target, global_mask, 
+                criterion, criterion_kwargs, device
+            )
+            total_mse_known += b_mse_known
+            total_mse_unknown += b_mse_unknown
+            total_variance += b_variance
+            total_penalty += b_penalty
+            total_gap += b_gap
+            total_nucnorm += b_nucnorm
+        else:
+            raise NotImplementedError
 
-    mean_loss = total_loss / max(total_examples, 1)
-    if task == 'classif':
-        mean_acc = total_acc / max(total_examples, 1)
-        mean_agree = total_agree / max(total_examples, 1)
+    mean_loss = total_loss / max(total_batches, 1)
+    if task_cat == 'classif':
+        mean_acc = total_acc / max(total_batches, 1)
+        mean_agree = total_agree / max(total_batches, 1)
         
         return (
             float(mean_loss), 
             float(mean_acc), 
             float(mean_agree)
         )
-    else:
-        mean_mse = total_mse / max(total_examples, 1)
-        mean_diversity = total_diversity / max(total_examples, 1)
+    elif task_cat == 'regression':
+        mean_mse = total_mse / max(total_batches, 1)
+        mean_diversity = total_diversity / max(total_batches, 1)
     
         return (
             float(mean_loss), 
             float(mean_mse), 
             float(mean_diversity),
         )
+    elif task_cat == 'reconstruction':
+        mean_mse_known = total_mse_known / max(total_batches, 1)
+        mean_mse_unknown = total_mse_unknown / max(total_batches, 1)
+        mean_variance = total_variance / max(total_batches, 1)
+        mean_penalty = total_penalty / max(total_batches, 1)
+        mean_gap = total_gap / max(total_batches, 1)
+        mean_nucnorm = total_nucnorm / max(total_batches, 1)
+        return (
+            float(mean_loss), 
+            float(mean_mse_known), 
+            float(mean_mse_unknown),
+            float(mean_variance),
+            float(mean_penalty),
+            float(mean_gap),
+            float(mean_nucnorm)
+        )
+    else:
+        raise NotImplementedError
 
 
 def _last_nonzero_per_col(A: torch.Tensor,
@@ -423,6 +525,10 @@ def baseline_mse_m(dataloader, globalmask, t, m, task, reduction = 'mean'):
             predictions_full = predictions_partial = torch.concat(
                 [torch.zeros(B, 1), targets[:, :-1]], dim=1
             ) # and the prediction is y(t)
+        
+        elif task == 'lrmc':
+            print("No baseline for lrmc task.")
+        
         else:
             raise NotImplementedError
         
@@ -480,11 +586,12 @@ def baseline_classif(dataloader, globalmask, t: int, m: int):
     )
     
 
-def final_test(model, aggregator, test_loader, globalmask, criterion, device, task_cat, cfg):
+def final_test(model, aggregator, test_loader, globalmask, criterion, criterion_kwargs, 
+               device, task_cat, cfg):
     if task_cat == 'classif':
         test_loss, test_acc, test_agree = evaluate(                             # type: ignore
-            model, aggregator, test_loader, criterion, device, task=task_cat,
-            t=cfg.t, m=cfg.m
+            model, aggregator, test_loader, criterion, criterion_kwargs, device, 
+            task_cat=task_cat, t=cfg.t, m=cfg.m, global_mask=globalmask
         )
         test_stats = (test_loss, test_acc, test_agree)
         print("Test Set Performance | ",
@@ -496,10 +603,10 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, device, ta
         print(f"Accuracy for naive prediction on test set, full info: {naive_full:.2f}")
         if cfg.memory is False:
             print(f"Accuracy for naive prediction on test set, partial info: {naive_partial:.2f}")
-    else:
+    elif task_cat == 'regression':
         test_loss, test_mse, test_diversity = evaluate(   # type: ignore
-            model, aggregator, test_loader, criterion, device, task=task_cat,
-            t=cfg.t, m=cfg.m
+            model, aggregator, test_loader, criterion, criterion_kwargs, device, 
+            task_cat=task_cat, t=cfg.t, m=cfg.m, global_mask=globalmask
         )
         test_stats = (test_loss, test_mse, test_diversity)
         print("Test Set Performance | ",
@@ -512,4 +619,11 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, device, ta
         print(f"MSE for naive prediction on test set, full info: {naive_full:.4f}")
         if cfg.memory is False:
             print(f"MSE for naive prediction on test set, partial info: {naive_partial:.4f}")
+    elif task_cat == 'reconstruction':
+        t_loss, t_mse_known, t_mse_unknown, t_variance, t_penalty, t_gap, t_nucnorm = evaluate( # type: ignore
+            model, aggregator, test_loader, criterion, criterion_kwargs, device,
+            task_cat=task_cat, t=cfg.t, m=cfg.m, global_mask=globalmask
+        )
+        test_stats = (t_loss, t_mse_known, t_mse_unknown, t_variance, t_penalty, t_gap, t_nucnorm)
+
     return test_stats

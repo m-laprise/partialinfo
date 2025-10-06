@@ -299,19 +299,22 @@ class ReconDecoder(nn.Module):
         self.num_agents = num_agents
         self.hidden_dim = hidden_dim
         self.maxrank = min(self.n // 2, self.m // 2)
+        self.fwd = nn.Linear(hidden_dim, hidden_dim, bias=True)
+        self.act = nn.SiLU()
+        #self.norm = nn.RMSNorm(hidden_dim)
         self.U_proj = nn.Linear(hidden_dim, self.n * self.maxrank, bias=False)
         self.V_proj = nn.Linear(hidden_dim, self.m * self.maxrank, bias=False)
 
     def forward(self, h):
         B, A, H = h.shape
+        #h = self.norm(h + self.act(self.fwd(h)))
+        h = self.act(self.fwd(h))
         U = self.U_proj(h).view(B, A, self.n, self.maxrank)  # [B, A, n, maxrank]
         V = self.V_proj(h).view(B, A, self.m, self.maxrank)  # [B, A, m, maxrank]
-
         # Compute H = U @ Vt for each agent
         recon = torch.matmul(U, V.transpose(-1, -2)) / self.maxrank # [B, A, n, m]
-        recon = recon.view(B, A, self.n * self.m)  # vectorize: [B, A, n * m]
-        return recon  # [batch, num_agents, output_dim]
-
+        recon = recon.view(B, A, self.n * self.m)   # vectorize: [B, A, n * m]
+        return recon                                # [B, A, output_dim]
 
 class Aggregator(nn.Module):
     """
@@ -397,7 +400,7 @@ class CollectiveInferPredict(nn.Module):
         self.n_agents = num_agents
         self.agent_d_out = agent_outputs_dim
         self.m = m
-        self.y_dim = m #y_dim
+        self.y_dim = y_dim
         
         self.W_fwd_H = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.agent_d_out))
         self.b_fwd_H = nn.Parameter(torch.zeros(self.n_agents, self.agent_d_out))

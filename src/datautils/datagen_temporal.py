@@ -372,13 +372,14 @@ class TemporalData(Dataset):
     Takes ground truth matrices and a task statement, and generates labeled data that can
     be provided to a DataLoader.
     """
-    def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, target_source: str = 'observed', verbose=True, rho_out: float = 0.4):
+    def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, 
+                 target_source: str = 'observed', verbose=True, rho_out: float = 0.4):
         super().__init__()
-        if task not in ['argmax', 'lastrow', 'nextrow', 'nonlinear_seq', 'nonlin_function']:
+        if task not in ['argmax', 'lastrow', 'nextrow', 'nonlin_function', 'lrmc']:
             raise NotImplementedError(f"Task {task} not implemented")
         
         # Keep a reference to GT to optionally build targets from latent factors
-        self.gt = matrices
+        #self.gt = matrices
         self.data = matrices[:len(matrices)]
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
@@ -396,6 +397,13 @@ class TemporalData(Dataset):
             self._row_sel_mask = sel_mask
         
         self.verbose = verbose
+        self.S = torch.linalg.svdvals(self.data)
+        if self.r < min(self.t, self.m):
+            self.gap = np.mean((self.S[:, self.r - 1] - self.S[:, self.r]).tolist())
+        else:
+            self.gap = 0.0
+        self.nuc = np.mean(self.S.sum(dim=1).tolist())
+        self.var = np.mean(self.data.var(dim=1).tolist())
         self.stats = self.__summary()
 
     def __len__(self):
@@ -464,28 +472,27 @@ class TemporalData(Dataset):
     def __getitem__(self, idx: int):
         _, t, m = self.data.shape
         matrix = self.data[idx, :, :]
-        sample = {
-            'matrix': matrix.view(1, t*m),
-            'label': self._generate_label(matrix) 
-        }
+        if self.task == 'lrmc':
+            sample = {
+                'matrix': matrix.view(1, t*m),
+                'label': matrix.view(t*m)
+            }
+        else:
+            sample = {
+                'matrix': matrix.view(1, t*m),
+                'label': self._generate_label(matrix) 
+            }
         return sample
     
     def __summary(self):
-        S = torch.linalg.svdvals(self.data)
-        if self.r < min(self.t, self.m):
-            gap = np.mean((S[:, self.r - 1] - S[:, self.r]).tolist())
-        else:
-            gap = 0.0
-        nuc = np.mean(S.sum(dim=1).tolist())
-        var = np.mean(self.data.var(dim=1).tolist())
         if self.verbose:
             print("--------------------------")
             print(f"Dataset of {len(self)} labelled rank-{self.r} matrices of size {self.t}x{self.m}")
-            print(f"Mean nuclear norm: {nuc:.4f}, Spectral gap: {gap:.4f}")
-            print(f"Mean variance of entries: {var:.4f}")
+            print(f"Mean nuclear norm: {self.nuc:.4f}, Spectral gap: {self.gap:.4f}")
+            print(f"Mean variance of entries: {self.var:.4f}")
             print(f"Total entries: {self.t * self.m}")
             print("--------------------------")
-        return { "nuclear_norms": nuc, "gaps": gap, "variances": var }
+        return { "nuclear_norms": self.nuc, "gaps": self.gap, "variances": self.var }
 
 #=========#
 """

@@ -16,31 +16,34 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     else:
         log_offset_train_loss = np.log(stats["train_loss"] - min(stats["train_loss"]))
         axs[0].plot(epochs, log_offset_train_loss, label="Train Loss", color='tab:blue')
+    axs[0].plot(epochs, np.log(stats["t_penalty"]), label="Penalty component", 
+                color='tab:grey', linestyle='--')
     axs[0].set_title("Training Loss")
     axs[0].set_xlabel("Epoch")
     axs[0].set_ylabel("Log Loss")
     axs[0].grid(True)
+    axs[0].legend()
     #axs[0].set_ylim(0, 2)
     axs[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-    axs[1].plot(epochs, stats["t_known_mse"], 
+    axs[1].plot(epochs, stats["t_mse_known"], 
                 label="Train MSE Known Entries", color='tab:blue')
-    axs[1].plot(epochs, stats["t_unknown_mse"], 
+    axs[1].plot(epochs, stats["t_mse_unknown"], 
                 label="Train MSE Unknown Entries", color='tab:purple')
     axs[1].plot(epochs, stats["t_variance"],
-                label="Train Var of Entries", color='tab:grey')
-    axs[1].axhline(y=true_variance, label="Mean True Var of Entries", 
-                   color='tab:grey', linestyle='--')
-    axs[1].plot(epochs, stats["val_known_mse"], linestyle='dotted', 
+                label="Train Var between Agents", color='tab:grey')
+    #axs[1].axhline(y=true_variance, label="Ref Var of Entries", 
+    #               color='tab:grey', linestyle='--')
+    axs[1].plot(epochs, stats["val_mse_known"], linestyle='dotted', 
                 label="Val MSE Known Entries", color='tab:green')
-    axs[1].plot(epochs, stats["val_unknown_mse"], linestyle='dotted', 
+    axs[1].plot(epochs, stats["val_mse_unknown"], linestyle='dotted', 
                 label="Val MSE Unknown Entries", color='tab:orange')
     axs[1].plot(epochs, stats["val_variance"], linestyle='dotted', 
-                label="Val Var of Entries", color='tab:red')
-    axs[1].set_title("Training & Validation Loss & Variance")
+                label="Val Var between Agents", color='tab:red')
+    axs[1].set_title("Training & Validation MSE and Diversity")
     axs[1].set_xlabel("Epoch")
-    axs[1].set_ylabel("Metric")
+    axs[1].set_ylabel("")
     axs[1].grid(True)
-    axs[1].set_ylim(0, 2)
+    #axs[1].set_ylim(0, 2)
     axs[1].legend()
     axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
     fig.tight_layout()
@@ -48,14 +51,14 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
     plt.close(fig)
     # Plot spectral diagnostics
     fig, ax = plt.subplots(1, 1, figsize=(7, 5), dpi=320)
-    ax.plot(epochs, stats["t_nuclear_norm"], label="Train Nuclear Norm", color='tab:purple')
-    ax.plot(epochs, stats["t_spectral_gap"], label="Train Spectral Gap", color='tab:orange')
-    ax.plot(epochs, stats["val_nuclear_norm"], label="Val Nuclear Norm", color='tab:blue', linestyle='dotted')
-    ax.plot(epochs, stats["val_spectral_gap"], label="Val Spectral Gap", color='tab:red', linestyle='dotted')
+    ax.plot(epochs, stats["t_nucnorm"], label="Train Nuclear Norm", color='tab:purple')
+    ax.plot(epochs, stats["t_gap"], label="Train Spectral Gap", color='tab:orange')
+    ax.plot(epochs, stats["val_nucnorm"], label="Val Nuclear Norm", color='tab:blue', linestyle='dotted')
+    ax.plot(epochs, stats["val_gap"], label="Val Spectral Gap", color='tab:red', linestyle='dotted')
     ax.axhline(y=true_nuclear_mean, color='tab:purple', linestyle='--', 
-               label="Mean True Nuclear Norm")
+               label="Ref Nuclear Norm")
     ax.axhline(y=true_gap_mean, color='tab:orange', linestyle='--', 
-               label="Mean True Spectral Gap")
+               label="Ref Spectral Gap")
     ax.set_title("Spectral Properties Over Epochs")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Singular Value Scale")

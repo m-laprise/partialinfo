@@ -127,6 +127,7 @@ if __name__ == "__main__":
         criterion = penalized_MSE
         criterion_kwargs['rank'] = cfg.r
         criterion_kwargs['theta'] = cfg.theta
+        criterion_kwargs['globalmask'] = globalmask
     else:
         criterion = stacked_MSE
     
@@ -175,7 +176,7 @@ if __name__ == "__main__":
         # TRAIN
         train_loss = train(
             model, aggregator, train_loader, optimizer, criterion, criterion_kwargs, device, scaler, 
-            t=cfg.t, m=cfg.m
+            t=cfg.t, m=cfg.m, globalmask=globalmask, task_cat=task_cat
         )
         scheduler.step()
         stats["train_loss"].append(train_loss)

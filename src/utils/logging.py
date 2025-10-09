@@ -88,7 +88,7 @@ def printlog(task_cat, epoch, stats, METRIC_KEYS):
     elif task_cat == 'reconstruction':
         print(
             f"Ep {epoch:03d}. ",
-            f"T loss: {stats['train_loss'][-1]:.4f} | pnlt: {stats['t_penalty'][-1]:.2f} | kn: {stats['t_mse_known'][-1]:.3f} | unk: {stats['t_mse_unknown'][-1]:.3f} ||",
+            f"T loss: {stats['train_loss'][-1]:.2e} | pnlt: {stats['t_penalty'][-1]:.3f} | kn: {stats['t_mse_known'][-1]:.3f} | unk: {stats['t_mse_unknown'][-1]:.3f} ||",
             f"V kn: {stats['val_mse_known'][-1]:.4f} | unk: {stats['val_mse_unknown'][-1]:.4f} ||",
             f"var: {stats['val_variance'][-1]:.2f} | gap: {stats['val_gap'][-1]:.2f} | NN: {stats['val_nucnorm'][-1]:.2f}"
         )

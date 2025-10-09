@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from geomloss import SamplesLoss
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 
@@ -138,37 +139,44 @@ def spectral_penalty_batched(predictions, rank, eps=1e-6, gamma=1.0):
         # possible for tall or thin matrices
         S = torch.linalg.svdvals(predictions)  # shape: [batch_size, min(n, m)]
     except RuntimeError:
-        return torch.tensor(0.0, device=predictions.device)
+        return torch.tensor(0.0, device=predictions.device), 0.0, 0.0
+    
     # sum of singular values from index 'rank' onward
     sum_rest = S[:, rank:].sum(dim=1) 
-    s_max = S[:, 0] 
+    #s_max = S[:, 0] 
     N = torch.tensor(min(predictions.shape[1], predictions.shape[2]), 
                      device=predictions.device, dtype=predictions.dtype)
-
-    soft_upper = torch.relu(s_max - 2 * N)
-    soft_lower = torch.relu((N // 2) - s_max)
-    range_penalty = soft_upper**2 + soft_lower**2 
-
-    penalty = sum_rest / (N - rank) + gamma * range_penalty
+    #soft_upper = torch.relu(s_max - 2 * N)
+    #soft_lower = torch.relu((N // 2) - s_max)
+    #range_penalty = soft_upper**2 + soft_lower**2 
+    penalty = sum_rest / (N - rank) #+ gamma * range_penalty
     # spectral gap between rank-th and (rank+1)-th singular value for each sample
     gap = S[:, rank - 1] - S[:, rank]
-    return penalty.mean(), gap.mean(), S.sum(dim=1).mean().item()
+    return penalty.mean(), gap.mean().item(), S.sum(dim=1).mean().item()
 
 
 def penalized_MSE(predictions: torch.Tensor,
                   targets: torch.Tensor,
                   reduction: str = 'mean', *,
-                  rank: int = 1, theta: float = 0.5):
+                  rank: int = 1, theta: float = 0.95, globalmask: torch.Tensor):
     B, A, y_dim = predictions.shape
     # NOTE: to change for rectangular implementation
     n = int(y_dim ** 0.5)
-    error = stacked_MSE(predictions, targets, reduction=reduction)
+    maskedpreds = predictions[globalmask.expand_as(predictions)].view(B, A, -1)
+    maskedtargets = targets[globalmask.expand_as(targets)].view(B, -1)
+    error = stacked_MSE(maskedpreds, 
+                        maskedtargets, reduction=reduction)
+    # Wasserstein-2 OT distance with small epsilon
+    ot = SamplesLoss("sinkhorn", p=2, blur=0.01)(
+            maskedpreds.mean(dim=1), 
+            maskedtargets
+    ) / 20
     penalty, _, _ = spectral_penalty_batched(predictions.reshape(B * A, n, n), rank)
-    return theta * error + (1 - theta) * penalty
+    return (theta * error + (1 - theta) * penalty + ot) /5
 
 
 def train(model, aggregator, loader, optimizer, criterion, criterion_kwargs, device, 
-          scaler: Optional[GradScaler], *, t, m):
+          scaler: Optional[GradScaler], *, t, m, globalmask, task_cat):
     model.train()
     if aggregator is not None:
         aggregator.train()
@@ -625,5 +633,7 @@ def final_test(model, aggregator, test_loader, globalmask, criterion, criterion_
             task_cat=task_cat, t=cfg.t, m=cfg.m, global_mask=globalmask
         )
         test_stats = (t_loss, t_mse_known, t_mse_unknown, t_variance, t_penalty, t_gap, t_nucnorm)
+        print("Test Set Performance | ",
+              f"Loss: {t_loss:.4f}, MSE known: {t_mse_known:.4f}, MSE unknown: {t_mse_unknown:.4f}, Penalty: {t_penalty:.4f}, Gap: {t_gap:.4f}, NucNorm: {t_nucnorm:.4f}")
 
     return test_stats

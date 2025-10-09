@@ -10,7 +10,7 @@ from matplotlib.ticker import MaxNLocator
 def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_variance):
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
     # Plot loss-related metrics in two panels
-    fig, axs = plt.subplots(2, 1, figsize=(10, 12), dpi=320)
+    fig, axs = plt.subplots(1, 3, figsize=(12, 5), dpi=320)
     if min(stats["train_loss"]) >= 0:
         axs[0].plot(epochs, np.log(stats["train_loss"]), label="Train Loss", color='tab:blue')
     else:
@@ -29,23 +29,29 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
                 label="Train MSE Known Entries", color='tab:blue')
     axs[1].plot(epochs, stats["t_mse_unknown"], 
                 label="Train MSE Unknown Entries", color='tab:purple')
-    axs[1].plot(epochs, stats["t_variance"],
-                label="Train Var between Agents", color='tab:grey')
     #axs[1].axhline(y=true_variance, label="Ref Var of Entries", 
     #               color='tab:grey', linestyle='--')
     axs[1].plot(epochs, stats["val_mse_known"], linestyle='dotted', 
                 label="Val MSE Known Entries", color='tab:green')
     axs[1].plot(epochs, stats["val_mse_unknown"], linestyle='dotted', 
                 label="Val MSE Unknown Entries", color='tab:orange')
-    axs[1].plot(epochs, stats["val_variance"], linestyle='dotted', 
-                label="Val Var between Agents", color='tab:red')
-    axs[1].set_title("Training & Validation MSE and Diversity")
+    axs[1].set_title("Training & Validation MSE")
     axs[1].set_xlabel("Epoch")
     axs[1].set_ylabel("")
     axs[1].grid(True)
     #axs[1].set_ylim(0, 2)
     axs[1].legend()
     axs[1].xaxis.set_major_locator(MaxNLocator(integer=True))
+    axs[2].plot(epochs, stats["t_variance"],
+                label="Train Var between Agents", color='tab:grey')
+    axs[2].plot(epochs, stats["val_variance"], linestyle='dotted', 
+                label="Val Var between Agents", color='tab:red')
+    axs[2].set_title("Training & Validation Diversity")
+    axs[2].set_xlabel("Epoch")
+    axs[2].set_ylabel("")
+    axs[2].grid(True)
+    axs[2].legend()
+    axs[2].xaxis.set_major_locator(MaxNLocator(integer=True))
     fig.tight_layout()
     fig.savefig(f"{filename_base}_loss_metrics.png")
     plt.close(fig)

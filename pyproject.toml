@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "geomloss>=0.2.6",
     "gprof2dot>=2025.4.14",
     "graphviz>=0.21",
     "ipykernel>=6.30.1",
@@ -12,6 +13,7 @@ dependencies = [
     "networkx>=3.2.1",
     "pandas>=2.2.3",
     "psutil>=6.0.0",
+    "pykeops>=2.3",
     "pytest>=8.4.0",
     "pytest-cov>=6.2.1",
     "scikit-learn>=1.6.1",

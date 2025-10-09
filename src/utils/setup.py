@@ -37,8 +37,10 @@ def create_data(args):
         if args.memory is True:
             sensingmasks = SensingMasksTemporal(all_data, args.num_agents, args.sensing_rho)
         else:
-            sensingmasks = SensingMasks(all_data, args.r, args.num_agents, args.density, 
-                                        rho=args.sensing_rho, gamma=args.sensing_gamma)
+            hide_future = False if args.task == 'lrmc' else True
+            sensingmasks = SensingMasks(
+                all_data, args.r, args.num_agents, args.density, 
+                hide_future=hide_future, rho=args.sensing_rho, gamma=args.sensing_gamma)
         train_data, val_data, test_data = sequential_split(
             all_data, [args.train_n, args.val_n, args.test_n]
         )

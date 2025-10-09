@@ -8,9 +8,9 @@ from typing import Any, Dict
 @dataclass
 class Config:
     # Ground truth 
-    t: int = field(default=25, metadata={"help": "Number of rows in each ground truth matrix"})
-    m: int = field(default=25, metadata={"help": "Number of columns in each ground truth matrix"})
-    r: int = field(default=2, metadata={"help": "Rank of each ground truth matrix"})
+    t: int = field(default=32, metadata={"help": "Number of rows in each ground truth matrix"})
+    m: int = field(default=32, metadata={"help": "Number of columns in each ground truth matrix"})
+    r: int = field(default=1, metadata={"help": "Rank of each ground truth matrix"})
     gt_mode: str = field(
         default="value", 
         metadata={"choices": ["value", "return"], 
@@ -30,7 +30,7 @@ class Config:
         default="lrmc",
         metadata={"choices": ["argmax", "lastrow", "nextrow", "nonlin_function", "lrmc"], 
                   "help": "Prediction task: argmax (classification), nextrow (regression), or nonlin_function (timewise regression)"})
-    density: float = field(default=0.5, metadata={"help": "Target proportion of known entries"})
+    density: float = field(default=0.8, metadata={"help": "Target proportion of known entries"})
     num_agents: int = field(default=20, metadata={"help": "Number of agents"})
     sensing_rho: float = field(default=0.25, 
                                metadata={"help": "Controls degree of overlap in sensing mask"})
@@ -38,7 +38,7 @@ class Config:
                                  metadata={"help": "Controls degree of inequality in sensing mask"})
 
     # Model hyperparameters
-    hidden_dim: int = field(default=32, metadata={"help": "Hidden dimension of the model"})
+    hidden_dim: int = field(default=128, metadata={"help": "Hidden dimension of the model"})
     sharedv: bool = field(      # boolean toggle: sharedv / no-sharedv
         default=True, 
         metadata={"help": "Agents share a V embedding matrix (use --no-sharedv to disable)"})
@@ -54,17 +54,17 @@ class Config:
     adjacency_mode: str = field(
         default="socnet", 
         metadata={"choices": ["all", "socnet"], "help": "Adjacency mode (all-to-all or social network)"})
-    nb_ties: int = field(default=4, metadata={"help": "Number of ties per agent"})
+    nb_ties: int = field(default=20, metadata={"help": "Number of ties per agent"})
     steps: int = field(default=1, metadata={"help": "Number of message passing steps"})
 
     # Training hyperparameters
     dropout: float = field(default=0.1, metadata={"help": "Dropout probability"})
     theta: float = field(default=0.95, metadata={"help": "Loss function parameter for LRMC"})
     lr: float = field(default=0.001, metadata={"help": "Initial learning rate"})
-    epochs: int = field(default=50, metadata={"help": "Number of training epochs"})
-    batch_size: int = field(default=64, metadata={"help": "Batch size"})
+    epochs: int = field(default=300, metadata={"help": "Number of training epochs"})
+    batch_size: int = field(default=128, metadata={"help": "Batch size"})
     patience: int = field(default=0, metadata={"help": "Early stopping patience"})
-    train_n: int = field(default=800, metadata={"help": "Number of training matrices"})
+    train_n: int = field(default=1200, metadata={"help": "Number of training matrices"})
     val_n: int = field(default=400, metadata={"help": "Number of validation matrices"})
     test_n: int = field(default=400, metadata={"help": "Number of test matrices"})
 

@@ -250,11 +250,6 @@ def _generate_U(vcovsU: torch.Tensor, *, offset: float = 0.0):
     return U_rt.T  # shape: (t, r)
 
 
-@torch.no_grad()
-def _fin_return(val_start, val_end):
-    return (val_end - val_start) / val_start
-
-
 class GTMatrices(Dataset):
     """
     Generates ground truth matrices. Task-agnostic and does not contain any labels.
@@ -272,26 +267,27 @@ class GTMatrices(Dataset):
                  U_only: bool = False,
                  seed: Optional[int] = None,
                  **kernel_kwargs):
-        assert N % realizations == 0
         super().__init__()
         if seed is not None:
             torch.manual_seed(seed)
-        self.mode = mode
-        self.kernel = kernel
-        self.vtype = vtype
         self.N = N
-        self.num_dgps = N // realizations
-        self.U_only = U_only
-        if self.U_only:
-            if r < m:
-                print(f"WARNING: U_only option is activated but rank {r} was requested.",
-                    "Full rank matrices will be returned.")
-                r = m
         self.t, self.m, self.r = t, m, r
-        self.structured = structured
-        self.realizations = realizations
         #self.sigma = sigma
-        self.U, self.V, self.vcovU = self._generate_factors(N, **kernel_kwargs)
+        self.structured = structured
+        if self.structured:
+            assert N % realizations == 0
+            self.realizations = realizations
+            self.mode = mode
+            self.kernel = kernel
+            self.vtype = vtype
+            self.num_dgps = N // realizations
+            self.U_only = U_only
+            if self.U_only:
+                if r < m:
+                    print(f"WARNING: U_only option is activated but rank {r} was requested.",
+                        "Full rank matrices will be returned.")
+                    r = m
+        self.U, self.V, self.vcovU = self._generate_factors(self.N, **kernel_kwargs)
 
     def __len__(self):
         return self.U.shape[0]
@@ -299,8 +295,6 @@ class GTMatrices(Dataset):
     def _generate_factors(self, N: int, **kernel_kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.structured:
             t = self.t
-            if self.mode == 'return':
-                t += 1
             vcovsUs = torch.zeros((self.num_dgps, self.r, t, t))
             Us = torch.zeros((self.realizations * self.num_dgps, t, self.r))
             Vs = torch.zeros((self.realizations * self.num_dgps, self.m, self.r))
@@ -316,7 +310,8 @@ class GTMatrices(Dataset):
                     Us[idx] = _generate_U(vcovsU)
                     Vs[idx] = V
         else:
-            Us = torch.rand(N, self.t, self.r, dtype=torch.float32) * 2
+
+            Us = torch.rand(N, self.t, self.r, dtype=torch.float32)
             Vs = torch.rand(N, self.m, self.r, dtype=torch.float32)
             vcovsUs = torch.eye(self.t).reshape(1, 1, self.t, self.t)
         return Us, Vs, vcovsUs
@@ -324,24 +319,19 @@ class GTMatrices(Dataset):
     def generate_matrices(self, idx = None):
         idx = np.arange(self.U.shape[0]) if idx is None else idx
         
-        if self.U_only:
-            U = self.U[idx]
-            for i in range(U.shape[0]):
-                U[i] /= U[i].std(dim=0)
-            return U
+        if self.structured:
+            if self.U_only:
+                U = self.U[idx]
+                for i in range(U.shape[0]):
+                    U[i] /= U[i].std()
+                return U
         
         M = torch.einsum('...ij,...kj->...ik', self.U[idx], self.V[idx])
         #M += self.sigma * torch.randn(M.shape, dtype=torch.float32)
-        if not self.structured:
-            M /= np.sqrt(self.r)
-            return M / M.std(dim=1, keepdim=True)
-        elif self.mode == 'return':
-            M_r = _fin_return(M[:, :-1, :], M[:, 1:, :])
-            return M_r / M_r.std(dim=1, keepdim=True)
-        else:
-            for i in range(M.shape[0]):
-                M[i] /= M[i].std(dim=0)
-            return M
+        for i in range(M.shape[0]):
+            M[i] /= M[i].std()
+        return M
+            
         
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
@@ -373,7 +363,7 @@ class TemporalData(Dataset):
     be provided to a DataLoader.
     """
     def __init__(self, matrices: GTMatrices, task: str = 'argmax', *, 
-                 target_source: str = 'observed', verbose=True, rho_out: float = 0.4):
+                 target_source: str = 'observed', verbose = True, rho_out: float = 0.4):
         super().__init__()
         if task not in ['argmax', 'lastrow', 'nextrow', 'nonlin_function', 'lrmc']:
             raise NotImplementedError(f"Task {task} not implemented")

@@ -127,28 +127,13 @@ def setup_model(args, sensingmasks, device, task_cat):
         elif task_cat == 'regression':
             aggregator = CollectiveInferPredict(
                 num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, 
-                m=args.m, y_dim=args.m
+                m=args.m, y_dim=args.m, uv=False
             )
         
         elif task_cat == 'reconstruction':
-            """aggregator = nn.Sequential(
-                ReconDecoder(
-                    hidden_dim=args.hidden_dim,
-                    n=args.t, m=args.m,
-                    num_agents=args.num_agents
-                ),
-                Aggregator(
-                    num_agents=args.num_agents, output_dim=args.t * args.m
-                )
-            )"""
-            #aggregator = ReconDecoder(
-            #    hidden_dim=args.hidden_dim,
-            #    n=args.t, m=args.m,
-            #    num_agents=args.num_agents
-            #)
             aggregator = CollectiveInferPredict(
                 num_agents=args.num_agents, agent_outputs_dim=args.hidden_dim, 
-                m=args.m, y_dim=args.t * args.m
+                m=args.m, y_dim=args.t * args.m, uv=True
             )
         
     return model, aggregator

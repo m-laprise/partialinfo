@@ -395,12 +395,13 @@ class CollectiveInferPredict(nn.Module):
     Regression module decoding internal states to next row values and outcome prediction
     for each agent.
     """
-    def __init__(self, num_agents: int, agent_outputs_dim: int, m: int, y_dim: int = 1):
+    def __init__(self, num_agents: int, agent_outputs_dim: int, m: int, y_dim: int, uv: bool):
         super().__init__()
         self.n_agents = num_agents
         self.agent_d_out = agent_outputs_dim
         self.m = m
         self.y_dim = y_dim
+        self.uv = uv
         
         self.W_fwd_H = nn.Parameter(torch.empty(self.n_agents, self.agent_d_out, self.agent_d_out))
         self.b_fwd_H = nn.Parameter(torch.zeros(self.n_agents, self.agent_d_out))
@@ -410,6 +411,9 @@ class CollectiveInferPredict(nn.Module):
         
         self.W_predict = nn.Parameter(torch.empty(self.n_agents, self.m, self.y_dim))
         self.b_predict = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
+        if self.uv:
+            self.W_predict2 = nn.Parameter(torch.empty(self.n_agents, self.m, self.y_dim))
+            self.b_predict2 = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
         
         self.prenorm = nn.RMSNorm(self.agent_d_out)
         self.swish = nn.SiLU()
@@ -424,6 +428,8 @@ class CollectiveInferPredict(nn.Module):
         _agent_init(self.W_fwd_H, "xavier_uniform_")
         _agent_init(self.W_decode, "xavier_uniform_")
         _agent_init(self.W_predict, "xavier_uniform_")
+        if self.uv:
+            _agent_init(self.W_predict2, "xavier_uniform_")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -443,6 +449,16 @@ class CollectiveInferPredict(nn.Module):
         agent_m = self.swish(agent_m)
         
         agent_y = torch.einsum('ban,any->bay', agent_m, self.W_predict) + self.b_predict # [B, A, y_dim]
+        if self.uv:
+            agent_y2 = torch.einsum('ban,any->bay', agent_m, self.W_predict2) + self.b_predict2 # [B, A, y_dim]
+            y_dim = agent_y.shape[-1]
+            # NOTE: change for rectangular implementation
+            # N is square root of y_dim
+            N = int(y_dim ** 0.5)
+            agent_y = agent_y.view(B, A, N, N)
+            agent_y2 = agent_y2.view(B, A, N, N)
+            # return agent_y @ agent_y' 
+            return torch.einsum('baij,bakj->baik', agent_y, agent_y2).view(B, A, -1) /2 # [B, A, y_dim]
         
         return agent_y
 

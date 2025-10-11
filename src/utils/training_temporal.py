@@ -140,16 +140,11 @@ def spectral_penalty_batched(predictions, rank, eps=1e-6, gamma=1.0):
         S = torch.linalg.svdvals(predictions)  # shape: [batch_size, min(n, m)]
     except RuntimeError:
         return torch.tensor(0.0, device=predictions.device), 0.0, 0.0
-    
     # sum of singular values from index 'rank' onward
     sum_rest = S[:, rank:].sum(dim=1) 
-    #s_max = S[:, 0] 
     N = torch.tensor(min(predictions.shape[1], predictions.shape[2]), 
                      device=predictions.device, dtype=predictions.dtype)
-    #soft_upper = torch.relu(s_max - 2 * N)
-    #soft_lower = torch.relu((N // 2) - s_max)
-    #range_penalty = soft_upper**2 + soft_lower**2 
-    penalty = sum_rest / (N - rank) #+ gamma * range_penalty
+    penalty = sum_rest / (N - rank)
     # spectral gap between rank-th and (rank+1)-th singular value for each sample
     gap = S[:, rank - 1] - S[:, rank]
     return penalty.mean(), gap.mean().item(), S.sum(dim=1).mean().item()
@@ -171,7 +166,8 @@ def penalized_MSE(predictions: torch.Tensor,
             maskedpreds.mean(dim=1), 
             maskedtargets
     ) / 20
-    penalty, _, _ = spectral_penalty_batched(predictions.reshape(B * A, n, n), rank)
+    b = min(B, 20)
+    penalty, _, _ = spectral_penalty_batched(predictions[:b].reshape(b * A, n, n), rank)
     return (theta * error + (1 - theta) * penalty + ot) /5
 
 

@@ -10,7 +10,7 @@ from matplotlib.ticker import MaxNLocator
 def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_variance):
     epochs = np.arange(1, len(stats["train_loss"]) + 1)
     # Plot loss-related metrics in two panels
-    fig, axs = plt.subplots(1, 3, figsize=(12, 5), dpi=320)
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4), dpi=320)
     if min(stats["train_loss"]) >= 0:
         axs[0].plot(epochs, np.log(stats["train_loss"]), label="Train Loss", color='tab:blue')
     else:
@@ -18,9 +18,9 @@ def plot_stats(stats, filename_base, true_nuclear_mean, true_gap_mean, true_vari
         axs[0].plot(epochs, log_offset_train_loss, label="Train Loss", color='tab:blue')
     axs[0].plot(epochs, np.log(stats["t_penalty"]), label="Penalty component", 
                 color='tab:grey', linestyle='--')
-    axs[0].set_title("Training Loss")
+    axs[0].set_title("Log Training Loss")
     axs[0].set_xlabel("Epoch")
-    axs[0].set_ylabel("Log Loss")
+    axs[0].set_ylabel("")
     axs[0].grid(True)
     axs[0].legend()
     #axs[0].set_ylim(0, 2)

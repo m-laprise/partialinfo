@@ -310,7 +310,6 @@ class GTMatrices(Dataset):
                     Us[idx] = _generate_U(vcovsU)
                     Vs[idx] = V
         else:
-
             Us = torch.rand(N, self.t, self.r, dtype=torch.float32)
             Vs = torch.rand(N, self.m, self.r, dtype=torch.float32)
             vcovsUs = torch.eye(self.t).reshape(1, 1, self.t, self.t)
@@ -371,6 +370,7 @@ class TemporalData(Dataset):
         # Keep a reference to GT to optionally build targets from latent factors
         #self.gt = matrices
         self.data = matrices[:len(matrices)]
+        B, T, M = self.data.shape
         self.t, self.m, self.r = matrices.t, matrices.m, matrices.r
         self.task = task
         self.u_only = bool(getattr(matrices, 'U_only', False))
@@ -393,7 +393,7 @@ class TemporalData(Dataset):
         else:
             self.gap = 0.0
         self.nuc = np.mean(self.S.sum(dim=1).tolist())
-        self.var = np.mean(self.data.var(dim=1).tolist())
+        self.var = np.mean(self.data.view(B, T * M).var(dim=1).tolist())
         self.stats = self.__summary()
 
     def __len__(self):

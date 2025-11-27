@@ -49,7 +49,7 @@ class DotGATHead(nn.Module):
     """
     def __init__(self,
                  num_agents: int, in_features: int, out_features: int, *, 
-                 sharedV: bool, dropout: float = 0, heads: int = 4):
+                 sharedV: bool, dropout: float, heads: int):
         super().__init__()
         assert out_features % heads == 0
         if in_features != out_features:
@@ -127,6 +127,39 @@ class DotGATHead(nn.Module):
         return out
 
 
+class ParallelFwdHead(nn.Module):
+    def __init__(self,
+                 num_agents: int, 
+                 in_features: int, 
+                 out_features: int, *, 
+                 dropout: float):
+        super().__init__()
+        self.n_agents = num_agents
+        self.d_hidden = in_features
+        self.d_out = out_features
+        self.dropout = dropout
+        
+        self.ParallelFwd_in = nn.Parameter(
+            torch.empty(self.n_agents, self.d_hidden, int(self.d_hidden * 1.5))
+        )
+        self.ParallelFwd_out = nn.Parameter(
+            torch.empty(self.n_agents, int(self.d_hidden * 1.5), self.d_hidden)
+        )
+        self.ParallelNorm = nn.RMSNorm(self.d_hidden)
+        self.act = nn.SiLU()
+        
+        self.reset_parameters()  # initialize weights
+    
+    def reset_parameters(self):
+        _agent_init(self.ParallelFwd_in, "xavier_uniform_")
+        _agent_init(self.ParallelFwd_out, "xavier_uniform_")
+    
+    def forward(self, x: torch.Tensor):
+        h = self.act(torch.einsum('bij,ijk->bik', x, self.ParallelFwd_in))
+        h = self.act(torch.einsum('bij,ijk->bik', h, self.ParallelFwd_out))
+        return self.ParallelNorm(x + h)
+
+
 class TrainableSmallWorld(nn.Module):
     """
     Additive attention-bias matrix for DotGAT.
@@ -185,6 +218,10 @@ class TrainableSmallWorld(nn.Module):
 
 
 class DistributedDotGAT(nn.Module):
+    """
+    Static version of distributed message-passing attention. 
+    If k = 0, attention is replaced by MLPs.
+    """
     def __init__(
         self, device, *,
         input_dim: int, # also n x m if vectorized
@@ -202,6 +239,7 @@ class DistributedDotGAT(nn.Module):
     ):
         super().__init__()
         self.n, self.m = n, m
+        self.k = k
         self.d_in = input_dim   # = n * m
         self.n_agents = num_agents
         self.d_hidden = hidden_dim # size of the internal state of each agent
@@ -216,21 +254,32 @@ class DistributedDotGAT(nn.Module):
         
         self.W_embed = nn.Parameter(torch.empty(self.n_agents, self.d_in, self.d_hidden))
         
-        if self.message_steps > 0  and num_agents > 1:
-            self.DotGAT = DotGATHead(self.n_agents, self.d_hidden, self.d_hidden, 
-                                     dropout=dropout, heads=num_heads, sharedV=sharedV)
-            
-            self.W_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
-            self.b_fwd1 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
-            self.W_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
-            self.b_fwd2 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
-            
-            self.attnorm = nn.RMSNorm(self.d_hidden)
-            self.mlpnorm = nn.RMSNorm(self.d_hidden)
-            
-            if self.message_steps > 0 and self.n_agents > 1 and self.adjacency_mode == 'socnet':
-                self.connect = TrainableSmallWorld(self.n_agents, device, k=min(k, self.n_agents - 1), 
-                                                   p=p, freeze_frac=freeze_zero_frac)
+        if self.n_agents > 1:
+            if self.message_steps > 0:
+                if self.k == 0:
+                    # This is the case where agents do not communicate.
+                    # Instead of attention message-passing turns, agents each do MLPs (alone).
+                    self.ParallelFwdHead = ParallelFwdHead(
+                        self.n_agents, self.d_hidden, self.d_hidden, dropout=dropout
+                    )
+                    self.norm1 = nn.RMSNorm(self.d_hidden)
+                    self.norm2 = nn.RMSNorm(self.d_hidden)
+                elif self.k > 0:
+                    # This is the attention message passing case.
+                    self.DotGAT = DotGATHead(self.n_agents, self.d_hidden, self.d_hidden, 
+                                             dropout=dropout, heads=num_heads, sharedV=sharedV)
+                    self.attnorm1 = nn.RMSNorm(self.d_hidden)
+                    self.attnorm2 = nn.RMSNorm(self.d_hidden)
+                    
+                    if self.adjacency_mode == 'socnet':
+                        self.connect = TrainableSmallWorld(self.n_agents, device, k=min(self.k, self.n_agents - 1), 
+                                                           p=p, freeze_frac=freeze_zero_frac)
+                
+                self.W_fwd1 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+                self.b_fwd1 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
+                self.W_fwd2 = nn.Parameter(torch.empty(self.n_agents, self.d_hidden, self.d_hidden))
+                self.b_fwd2 = nn.Parameter(torch.zeros(self.n_agents, self.d_hidden))
+                self.mlpnorm = nn.RMSNorm(self.d_hidden)
         
         self.residual_drop1 = nn.Dropout(self.dropout)
         self.residual_drop2 = nn.Dropout(self.dropout)
@@ -269,9 +318,15 @@ class DistributedDotGAT(nn.Module):
         else:
             attn_bias = None
         for _ in range(self.message_steps):
-            h = h + self.residual_drop1(self.DotGAT(self.attnorm(h), attn_bias))
+            h = h + self.residual_drop1(self.DotGAT(self.attnorm1(h), attn_bias))
             h = h + self.residual_drop2(self._mlp(self.mlpnorm(h)))
-        return self.attnorm(h)
+        return self.attnorm2(h)
+    
+    def _parallel_process(self, h: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.message_steps):
+            h = h + self.residual_drop1(self.ParallelFwdHead(self.norm1(h)))
+            h = h + self.residual_drop2(self._mlp(self.mlpnorm(h)))
+        return self.norm2(h)
     
     def forward(self, x):
         # x: [batch, num_agents, d_in]
@@ -287,7 +342,10 @@ class DistributedDotGAT(nn.Module):
         # Do attention-based message passing if message_steps > 0; otherwise,
         # network reduces to a simple encoder - decoder
         if self.message_steps > 0 and self.n_agents > 1:
-            h = self._message_passing(h)
+            if self.k > 0:
+                h = self._message_passing(h)
+            elif self.k == 0:
+                h = self._parallel_process(h)
         return h
 
 
@@ -412,8 +470,13 @@ class CollectiveInferPredict(nn.Module):
         self.W_predict = nn.Parameter(torch.empty(self.n_agents, self.m, self.y_dim))
         self.b_predict = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
         if self.uv:
-            self.W_predict2 = nn.Parameter(torch.empty(self.n_agents, self.m, self.y_dim))
-            self.b_predict2 = nn.Parameter(torch.zeros(self.n_agents, self.y_dim))
+            # NOTE: change for rectangular implementation
+            self.N = int(self.y_dim ** 0.5)
+            self.maxrank = self.N // 2
+            self.W_predict_U = nn.Parameter(torch.empty(self.n_agents, self.m, self.maxrank * self.N))
+            self.b_predict_U = nn.Parameter(torch.zeros(self.n_agents, self.maxrank * self.N))
+            self.W_predict_V = nn.Parameter(torch.empty(self.n_agents, self.m, self.maxrank * self.N))
+            self.b_predict_V = nn.Parameter(torch.zeros(self.n_agents, self.maxrank * self.N))
         
         self.prenorm = nn.RMSNorm(self.agent_d_out)
         self.swish = nn.SiLU()
@@ -429,7 +492,8 @@ class CollectiveInferPredict(nn.Module):
         _agent_init(self.W_decode, "xavier_uniform_")
         _agent_init(self.W_predict, "xavier_uniform_")
         if self.uv:
-            _agent_init(self.W_predict2, "xavier_uniform_")
+            _agent_init(self.W_predict_U, "xavier_uniform_")
+            _agent_init(self.W_predict_V, "xavier_uniform_")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -450,15 +514,12 @@ class CollectiveInferPredict(nn.Module):
         
         agent_y = torch.einsum('ban,any->bay', agent_m, self.W_predict) + self.b_predict # [B, A, y_dim]
         if self.uv:
-            agent_y2 = torch.einsum('ban,any->bay', agent_m, self.W_predict2) + self.b_predict2 # [B, A, y_dim]
-            y_dim = agent_y.shape[-1]
-            # NOTE: change for rectangular implementation
-            # N is square root of y_dim
-            N = int(y_dim ** 0.5)
-            agent_y = agent_y.view(B, A, N, N)
-            agent_y2 = agent_y2.view(B, A, N, N)
+            agent_U = torch.einsum('ban,any->bay', agent_m, self.W_predict_U) + self.b_predict_U # [B, A, y_dim]
+            agent_V = torch.einsum('ban,any->bay', agent_m, self.W_predict_V) + self.b_predict_V # [B, A, y_dim]
+            agent_U = agent_U.view(B, A, self.N, self.maxrank)
+            agent_V = agent_V.view(B, A, self.N, self.maxrank)
             # return agent_y @ agent_y' 
-            return torch.einsum('baij,bakj->baik', agent_y, agent_y2).view(B, A, -1) /2 # [B, A, y_dim]
+            return torch.einsum('baij,bakj->baik', agent_U, agent_V).view(B, A, -1) /2 # [B, A, y_dim]
         
         return agent_y
 

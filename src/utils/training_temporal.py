@@ -142,9 +142,8 @@ def spectral_penalty_batched(predictions, rank, eps=1e-6, gamma=1.0):
         return torch.tensor(0.0, device=predictions.device), 0.0, 0.0
     # sum of singular values from index 'rank' onward
     sum_rest = S[:, rank:].sum(dim=1) 
-    N = torch.tensor(min(predictions.shape[1], predictions.shape[2]), 
-                     device=predictions.device, dtype=predictions.dtype)
-    penalty = sum_rest / (N - rank)
+    #N = S.shape[-1]
+    penalty = sum_rest #/ (N - rank)
     # spectral gap between rank-th and (rank+1)-th singular value for each sample
     gap = S[:, rank - 1] - S[:, rank]
     return penalty.mean(), gap.mean().item(), S.sum(dim=1).mean().item()
@@ -153,10 +152,10 @@ def spectral_penalty_batched(predictions, rank, eps=1e-6, gamma=1.0):
 def penalized_MSE(predictions: torch.Tensor,
                   targets: torch.Tensor,
                   reduction: str = 'mean', *,
-                  rank: int = 1, theta: float = 0.95, globalmask: torch.Tensor):
+                  rank: int, theta: float, globalmask: torch.Tensor):
     B, A, y_dim = predictions.shape
     # NOTE: to change for rectangular implementation
-    n = int(y_dim ** 0.5)
+    #n = int(y_dim ** 0.5)
     maskedpreds = predictions[globalmask.expand_as(predictions)].view(B, A, -1)
     maskedtargets = targets[globalmask.expand_as(targets)].view(B, -1)
     error = stacked_MSE(maskedpreds, 
@@ -166,9 +165,10 @@ def penalized_MSE(predictions: torch.Tensor,
             maskedpreds.mean(dim=1), 
             maskedtargets
     ) / 20
-    b = min(B, 20)
-    penalty, _, _ = spectral_penalty_batched(predictions[:b].reshape(b * A, n, n), rank)
-    return (theta * error + (1 - theta) * penalty + ot) /5
+    #b = min(B, 20)
+    #penalty, _, _ = spectral_penalty_batched(predictions[:b].reshape(b * A, n, n), rank)
+    #return (theta * error + (1 - theta) * penalty + ot) /5
+    return (error + ot) /5
 
 
 def train(model, aggregator, loader, optimizer, criterion, criterion_kwargs, device, 
@@ -325,7 +325,7 @@ def recon_acc(preds: torch.Tensor, target: torch.Tensor, globalmask: torch.Tenso
     # NOTE: change for rectangular implementation
     n = int(y_dim ** 0.5)
     b_penalty, b_gap, b_nucnorm = spectral_penalty_batched(
-        avg_preds.view(B, n, n), criterion_kwargs['rank']
+        avg_preds.view(B, n, n)[0:1], criterion_kwargs['rank']
     )
     return b_mse_known, b_mse_unknown, b_variance, b_penalty, b_gap, b_nucnorm
 

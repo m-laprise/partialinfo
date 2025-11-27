@@ -85,8 +85,6 @@ def create_data(args):
     )
 
 
-
-
 def setup_model(args, sensingmasks, device, task_cat):
     if args.memory is True:
         if args.task == 'nonlin_function':

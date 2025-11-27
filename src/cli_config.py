@@ -10,7 +10,7 @@ class Config:
     # Ground truth 
     t: int = field(default=32, metadata={"help": "Number of rows in each ground truth matrix"})
     m: int = field(default=32, metadata={"help": "Number of columns in each ground truth matrix"})
-    r: int = field(default=1, metadata={"help": "Rank of each ground truth matrix"})
+    r: int = field(default=2, metadata={"help": "Rank of each ground truth matrix"})
     gt_mode: str = field(
         default="value", 
         metadata={"choices": ["value", "return"], 
@@ -50,7 +50,7 @@ class Config:
             "help": "Dynamic version where agents with memory process rows one by one (use --no-memory to disable)"
         }
     )
-    att_heads: int = field(default=4, metadata={"help": "Number of attention heads"})
+    att_heads: int = field(default=8, metadata={"help": "Number of attention heads"})
     adjacency_mode: str = field(
         default="socnet", 
         metadata={"choices": ["all", "socnet"], "help": "Adjacency mode (all-to-all or social network)"})

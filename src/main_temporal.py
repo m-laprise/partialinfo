@@ -11,6 +11,29 @@ uv run ./src/main_lrmc_temporal.py \
   --batch-size 100 --train-n 1000 --no-sharedv \
   --gt-mode 'value' --kernel 'cauchy' --vtype 'random' --task 'argmax'
 ```
+
+Each agent independently receives their own masked view of the matrix. 
+`self.connect` represents the agent-to-agent communication graph.
+The attention computation adds this adjacency matrix to the attention logits.
+
+Explicit message passing rounds are controlled by message_steps in DistributedDotGAT, with message 
+updates applied iteratively through GAT heads.
+
+Design choices:
+- *Adjacency matrix* is neither learned nor input-dependent: 
+Currently self.connect is static, and shared across all heads and batches.
+Alternatives may include learned connectivity (requires re-writing the attention kernel), static or 
+dynamic top-k sparsification (listening to only some neighbors), thresholded softmax, or learned gating. 
+
+- For reconstruction, *collective aggregation* occurs through simple averaging:
+Alternatives may include learned and/or input-dependent pooling across agents, attention-based 
+aggregation, game-theoretic aggregation of subsets of agents based on utility/diversity contribution
+
+Possible improvements or modifications:
+- Save and plot reconstructed matrices over time
+- Implement unequal distribution of entries between agents, and tracking of correlation between
+agent input and output quality
+- Version where agent inputs are projections rather than masked matrices 
 """
 
 import gc

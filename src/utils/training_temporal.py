@@ -101,11 +101,6 @@ def stacked_MSE(predictions: torch.Tensor,
 
         if reduction == 'mean':
             return errors.mean()
-        elif reduction == 'sum':
-            return errors.sum()
-        elif reduction == 'none':
-            # average over y_dim then over time -> [B, A]
-            return errors.mean(dim=-1).mean(dim=1)
         else:
             raise ValueError(f"Invalid reduction type: {reduction}")
 

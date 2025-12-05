@@ -1,15 +1,15 @@
 """
 Some notes about the sensing process:
 
-Agents independently sample s_i entries (without replacement) from the global known set G.
+Agents independently sample s_i entries (without replacement) from the global known set of size G.
 Mu is the mean per-agent endowment. Overlap is purely random and increases as mu increases.
 
 Rho controls mu via mu(rho) = (1-rho) G/N + rho G (where N is the number of agents).
 When rho = 0, mu = G/N (each agent on average receives the equal share). 
 When rho = 1, mu = G (each agent on average requests the whole global set). 
 By controlling mu, rho implicitly controls the degree of overlap between agents. The formula 
-interpolates between an equal partition with no overlap, and full sharing of known entries 
-by all agents.
+interpolates between an approximately equal partition with low overlap, and full sharing of known 
+entries by all agents.
 
 Gamma controls the inequality of agent endowments around the mean mu. Gamma is mapped to a Dirichlet 
 concentration alpha (gamma_curve controls the nonlinearity of the mapping; <1 increases sensitivity 
@@ -35,7 +35,7 @@ Interaction of rho and gamma:
 
 When gamma is near one (very unequal/heavy-tailed):
 	- A few agents get a very large share of G.
-    - Even for small rho, overlap is already be significant among large agents and negligible among 
+    - Even for small rho, overlap is already significant among large agents and negligible among 
       small ones.
     - As rho increases, small agents' s_i increases toward mu, while the largest agents quickly 
       saturate at G. Once large agents saturate, pairwise overlap among large agents approaches 1; 
@@ -50,7 +50,7 @@ clipped at G.
 
 Note that if G is set too low, there may not be meaningful variation when changing rho and gamma.
 Note that agents with zero counts are possible, especially when gamma is high.
-Note that the 100 and 0.01 alpha endpoints can be tweaked to compress/expand the inequality range.
+Note that the 50 and 0.01 alpha endpoints can be tweaked to compress/expand the inequality range.
 """
 
 import numpy as np
@@ -73,7 +73,7 @@ class SensingMasks(object):
         rank (int): Rank of the matrices.
         num_agents (int): Number of agents.
         density (float): Target density of global known entries.
-        future_only (bool): hide the last row from the global_known set (same semantics as before).
+        hide_future (bool): hide the last row from the global_known set.
         rho (float): overlap-control hyperparameter (default 0.0).
         gamma (float): inequality-control hyperparameter (default 0.0).
         gamma_curve (float): controls the mapping of gamma to a Dirichlet alpha.
@@ -135,6 +135,8 @@ class SensingMasks(object):
                     return X * self.masks
                 elif X.shape[0] == 1 and X.shape[1] == self.total_entries:
                     return X.repeat(self.num_agents, 1) * self.masks
+                else:
+                    raise ValueError(f"X is of unexpected shape {X.shape}")
             elif len(X.shape) == 3:
                 # Batched implementation
                 assert X.shape[1] == 1
@@ -275,7 +277,7 @@ class SensingMasks(object):
     def __summary(self, masks):
         # compute pairwise overlaps list (Jaccard)
         overlaps = _compute_pairwise_overlaps(masks) if self.num_agents > 1 else []
-        mean_overlap = float(np.mean(overlaps)) if overlaps else ( -np.inf if self.num_agents == 1 else 0.0 )
+        mean_overlap = float(np.mean(overlaps)) if overlaps else ( np.nan if self.num_agents == 1 else 0.0 )
         var_overlap = float(np.var(overlaps, ddof=0)) if overlaps else 0.0
 
         self.stats["agent_overlap"] = mean_overlap
@@ -292,7 +294,7 @@ class SensingMasks(object):
         print(f"Avg entries per agent: {endowment_mean:.1f}")
         print(f"Fraction clipped at G: {self.stats['fraction_clipped']:.3f}")
         if self.stats["oversample_flags"] > 0:
-            print(f"WARNING ⚠️  {self.stats['oversample_flags']} matrices had agents sampling all known entries.")
+            print(f"WARNING ⚠️  {self.stats['oversample_flags']} cases of agents sampling all possible entries.")
         print("--------------------------")
 
 def _compute_pairwise_overlaps(masks: torch.Tensor):

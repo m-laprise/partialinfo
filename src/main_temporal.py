@@ -4,12 +4,11 @@ with learned agent-based message passing setup.
 
 Example usage:
 ```
-uv run ./src/main_lrmc_temporal.py \
-  --t 50 --m 25 --r 6 --density 0.5 \
-  --num-agents 64 --nb_ties 4 --hidden-dim 64 \
-  --lr 1e-4 --epochs 150 --steps 5 \
-  --batch-size 100 --train-n 1000 --no-sharedv \
-  --gt-mode 'value' --kernel 'cauchy' --vtype 'random' --task 'argmax'
+uv run ./src/main_temporal.py \
+  --t 24 --m 24 --r 1 --density 0.5 \
+  --num-agents 100 --nb-ties 0 --hidden-dim 300 \
+  --lr 1e-3 --epochs 300 --steps 1 --no-sharedv \
+  --batch-size 256 --train-n 6000 --task 'lrmc'
 ```
 
 Each agent independently receives their own masked view of the matrix. 

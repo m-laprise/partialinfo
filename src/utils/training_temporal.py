@@ -115,11 +115,6 @@ def stacked_MSE(predictions: torch.Tensor,
 
         if reduction == 'mean':
             return errors.mean()
-        elif reduction == 'sum':
-            return errors.sum()
-        elif reduction == 'none':
-            # average over y_dim -> [B, A]
-            return errors.mean(dim=-1)
         else:
             raise ValueError(f"Invalid reduction type: {reduction}")
 
@@ -309,7 +304,7 @@ def recon_acc(preds: torch.Tensor, target: torch.Tensor, globalmask: torch.Tenso
     else:
         var_across_agents = preds.var(dim=-2, unbiased=False)
         variance_per_example = var_across_agents.flatten(start_dim=1).mean(dim=1)
-        b_variance = float(variance_per_example.sum().item())
+        b_variance = float(variance_per_example.mean().item())
     # Average across agents
     avg_preds = preds.mean(dim=-2)      # [B, y_dim]
 

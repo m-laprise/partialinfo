@@ -111,10 +111,12 @@ def stacked_MSE(predictions: torch.Tensor,
         if targets.shape != (B, y_dim):
             raise ValueError(f"For 3D predictions expected targets shape [B, y_dim], got {targets.shape}")
 
-        errors = (predictions - targets.unsqueeze(1)) ** 2  # [B, A, y_dim]
-
         if reduction == 'mean':
-            return errors.mean()
+            return ((predictions - targets.unsqueeze(1)) ** 2).mean()
+            #this is equivalent to mean of agent-level mean MSE:
+            #return ((predictions - targets.unsqueeze(1)) ** 2).mean(dim=2).mean(dim=1).mean()
+            ## MSE of mean (collective) prediction would be:
+            #return ((predictions.mean(dim = 1) - targets) ** 2).mean()
         else:
             raise ValueError(f"Invalid reduction type: {reduction}")
 
@@ -150,15 +152,37 @@ def penalized_MSE(predictions: torch.Tensor,
     maskedtargets = targets[globalmask.expand_as(targets)].view(B, -1)
     error = stacked_MSE(maskedpreds, 
                         maskedtargets, reduction=reduction)
+    # Randomly subsample 30% of the global mask
+    # submask = torch.zeros_like(globalmask, dtype=torch.bool)
+    # if globalmask.any():
+    #     num_elements_to_select = max(1, int(globalmask.sum().item() * 0.1))
+    #     true_indices = globalmask.nonzero(as_tuple=True)
+    #     perm = torch.randperm(
+    #         true_indices[0].size(0), device=globalmask.device
+    #     )[:num_elements_to_select]
+    #     selected_indices = tuple(idx[perm] for idx in true_indices)
+    #     submask[selected_indices] = True
+    # submaskedpreds = predictions[submask.expand_as(predictions)].view(B, A, -1)
+    # submaskedtargets = targets[submask.expand_as(targets)].view(B, -1)
+        
     # Wasserstein-2 OT distance with small epsilon
     ot = SamplesLoss("sinkhorn", p=2, blur=0.01)(
             maskedpreds.mean(dim=1), 
             maskedtargets
-    ) / 20
+    ) /20
+    
+    #ot_loss_fn = SamplesLoss("sinkhorn", p=1, blur=0.01)
+    #agents_ot = ot_loss_fn(
+    #        maskedpreds[0:20, :, :].reshape(20 * A, -1, 1), 
+    #        maskedtargets[0:20, :].unsqueeze(1).expand(20, A, -1).reshape(20 * A, -1, 1)
+    #)                          # This should be [B, A, knownentries]
+    #ot = agents_ot.mean()      # This should be a scalar
+    
     #b = min(B, 20)
     #penalty, _, _ = spectral_penalty_batched(predictions[:b].reshape(b * A, n, n), rank)
     #return (theta * error + (1 - theta) * penalty + ot) /5
     return (error + ot) /5
+    #return error
 
 
 def train(model, aggregator, loader, optimizer, criterion, criterion_kwargs, device, 
@@ -194,7 +218,7 @@ def train(model, aggregator, loader, optimizer, criterion, criterion_kwargs, dev
             B = target.size(0)
             with autocast_ctx:
                 logits = aggregator(model(x))
-                loss = criterion(logits, target, reduction='mean', **criterion_kwargs)
+                loss = criterion(logits, target, reduction='mean', **criterion_kwargs) 
             
         if use_amp:
             scaler.scale(loss).backward()   # type: ignore
